@@ -54,3 +54,12 @@ ORDER_STEP: Final = 1000
 
 # Undo/redo: how many past states to retain (snapshot-based history, store-wide).
 UNDO_HISTORY_LIMIT: Final = 50
+
+# Input limits. Every mutation snapshots the whole document for undo and every change
+# is broadcast in full to each connected client, so unbounded text from any logged-in
+# user (or an automation) would be multiplied many times over in memory.
+MAX_TITLE_LEN: Final = 500  # card / column / board / checklist titles, check items
+MAX_TEXT_LEN: Final = 20000  # card descriptions and comments
+MAX_LABEL_NAME_LEN: Final = 60
+MAX_PASTE_LINES: Final = 200  # cards created by one multi-line paste
+MAX_LABELS_PER_BOARD: Final = 100

@@ -243,6 +243,19 @@ def run():
     check("get_events returns only in-window cards",
           soon["id"] in uids and d_card["id"] in uids and t_card["id"] not in uids)
 
+    # A finished card stays in the calendar view but stops being the "next event".
+    mgr.update_card(soon["id"], status="completed")
+    nxt = entity.event
+    check("completed card is skipped as the next event", nxt is not None and nxt.uid == d_card["id"])
+    still = asyncio.run(entity.async_get_events(
+        FakeHass(),
+        datetime.datetime(2026, 6, 17, tzinfo=datetime.timezone.utc),
+        datetime.datetime(2026, 6, 19, tzinfo=datetime.timezone.utc),
+    ))
+    check("completed card still shows in the calendar view", soon["id"] in {e.uid for e in still})
+    mgr.update_card(soon["id"], status="needs_action", due_complete=True)
+    check("due_complete card is skipped as the next event", entity.event.uid == d_card["id"])
+
     failed = [n for n, ok in RESULTS if not ok]
     print()
     print(f"{len(RESULTS) - len(failed)}/{len(RESULTS)} checks passed")

@@ -29,8 +29,12 @@ def _guard(
 
     @callback
     def wrapper(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> None:
+        user = getattr(connection, "user", None)
+        manager = _manager(hass)
         try:
-            result = handler(hass, connection, msg, _manager(hass))
+            # Attribute the change to whoever sent it (comment author, event user).
+            with manager.acting_as(getattr(user, "id", None), getattr(user, "name", None)):
+                result = handler(hass, connection, msg, manager)
         except HakanbanError as err:
             connection.send_error(msg["id"], "invalid_request", str(err))
             return
@@ -254,9 +258,11 @@ def ws_update_card(hass, connection, msg, manager: HakanbanData):
 )
 @_guard
 def ws_move_card(hass, connection, msg, manager: HakanbanData):
+    user = getattr(getattr(connection, "user", None), "name", None)
     return manager.move_card(
         msg["card_id"], msg["to_column"],
         position=msg.get("position"), to_board=msg.get("to_board"),
+        user=user,
     )
 
 

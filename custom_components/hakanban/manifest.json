@@ -4,10 +4,10 @@
   "codeowners": ["@neilellis"],
   "config_flow": true,
   "dependencies": ["http", "websocket_api", "frontend", "todo", "calendar"],
-  "documentation": "https://github.com/neilellis/hakanban",
+  "documentation": "https://github.com/leashjay/ha-kanban",
   "integration_type": "hub",
   "iot_class": "local_push",
-  "issue_tracker": "https://github.com/neilellis/hakanban/issues",
+  "issue_tracker": "https://github.com/leashjay/ha-kanban/issues",
   "single_config_entry": true,
-  "version": "0.1.8"
+  "version": "0.1.8-fork.1"
 }
