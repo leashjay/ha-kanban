@@ -72,12 +72,14 @@ class FakeStore:
 
     def __init__(self):
         self.saved = 0
+        self.pending = None  # the callable a delayed save would call when it fires
 
     async def async_load(self):
         return {"boards": {}, "cards": {}}
 
-    def async_schedule_save(self, data):
+    def async_schedule_save(self, data_func):
         self.saved += 1
+        self.pending = data_func
 
     async def async_save(self, data):
         self.saved += 1
@@ -112,7 +114,8 @@ def run():
     data = _load_module("hkpkg", "data")
 
     hass = FakeHass()
-    mgr = data.HakanbanData(hass, FakeStore())
+    store = FakeStore()
+    mgr = data.HakanbanData(hass, store)
 
     # Seed a board with 3 columns (mirrors async_load's first-run seed).
     board = mgr.create_board("Test", seed=True)
@@ -334,6 +337,162 @@ def run():
     moved_card = mgr.move_card(lc["id"], ocol, to_board=oid)
     check("cross-board move renumbers on the new board", moved_card["number"] == existing["number"] + 1)
     check("cross-board move drops labels the new board lacks", moved_card["labels"] == ["green"])
+
+    # ------------------------------------------------ persistence / payload cache
+    pb = mgr.create_board("Persist", seed=True)
+    pid, pcol = pb["id"], pb["columns"][0]["id"]
+    mgr.create_card(pid, pcol, "kept")
+    check("a delayed save writes the current document", store.pending() is mgr._data)
+    raises(mgr.create_cards_bulk, pid, pcol, ["half"] * 3 + ["x" * 501])
+    check("after a rolled-back failure the pending save writes the restored document",
+          store.pending() is mgr._data and not any(c["title"] == "half" for c in store.pending()["cards"].values()))
+    mgr.undo()
+    check("after undo the pending save follows the new document", store.pending() is mgr._data)
+
+    p1 = mgr.full_payload()
+    check("payload is cached between changes", mgr.full_payload() is p1)
+    mgr.create_card(pid, pcol, "invalidates")
+    p2 = mgr.full_payload()
+    check("a change invalidates the cached payload", p2 is not p1 and any(
+        c["title"] == "invalidates" for b in p2["boards"] for col in b["columns"] for c in col["cards"]))
+
+    # A mutation that edits an existing card and then fails must leave neither the document
+    # nor the (cached) payload showing the half-applied edit.
+    victim = mgr.create_card(pid, pcol, "intact")
+
+    @data._undoable
+    def mutate_then_fail(self, card_id):
+        self.cards[card_id]["title"] = "HALF-APPLIED"
+        raise data.HakanbanError("boom")
+
+    def titles(payload):
+        return [c["title"] for b in payload["boards"] for col in b["columns"] for c in col["cards"]]
+
+    before_titles = titles(mgr.full_payload())  # primes the cache
+    raises(mutate_then_fail, mgr, victim["id"])
+    check("a failed mutation is rolled back in the document", mgr.cards[victim["id"]]["title"] == "intact")
+    check("a failed mutation never leaks into the cached payload",
+          "HALF-APPLIED" not in titles(mgr.full_payload()) and titles(mgr.full_payload()) == before_titles)
+    check("payload groups cards by column in order", [
+        c["title"] for col in mgr.full_payload()["boards"][-1]["columns"][:1] for c in col["cards"]] == [
+        c["title"] for c in mgr.cards_in_column(pcol)])
+    arch = mgr.create_card(pid, pcol, "archived one")
+    mgr.update_card(arch["id"], archived=True)
+    check("archived cards stay out of the payload", not any(
+        c["id"] == arch["id"] for b in mgr.full_payload()["boards"] for col in b["columns"] for c in col["cards"]))
+
+    # Which board's listeners are told: one board, or everyone for undo/cross-board moves.
+    sent = []
+    data.async_dispatcher_send = lambda hass_, signal, board_id=None: sent.append(board_id)
+    mgr.create_card(pid, pcol, "same board")
+    check("a normal change signals just its board", sent[-1] == pid)
+    mv_src = mgr.create_card(pid, pcol, "travels")
+    other_b = mgr.create_board("Elsewhere", seed=True)
+    sent.clear()
+    mgr.move_card(mv_src["id"], other_b["columns"][0]["id"], to_board=other_b["id"])
+    check("a cross-board move signals every board", sent[-1] is None)
+    mgr.undo()
+    check("undo signals every board", sent[-1] is None)
+
+    # ------------------------------------------------------------ due / assignee validation
+    vb = mgr.create_board("Validation", seed=True)
+    vid, vcol = vb["id"], vb["columns"][0]["id"]
+    for good in ("2026-10-20", "2026-10-20T09:30", "2026-10-20T09:30:15", "2026-10-20T09:30:15.123456",
+                 "2026-10-20T09:30:00+13:00", "2026-10-20T09:30:00Z"):
+        check(f"due accepted: {good}", mgr.create_card(vid, vcol, "d", due=good)["due"] == good)
+    for bad in ('"onclick=alert(1)', 'x" onfocus="y', "tomorrow", "2026-13-40", "2026-02-30",
+                "2026-10-20T25:00", "2026-10-20T09:61", "2026-10-20T09:30:99", "2026-10-20<script>",
+                "2026-10-20T09:30\n", "20261020"):
+        check(f"due rejected: {bad!r}", raises(mgr.create_card, vid, vcol, "d", due=bad))
+    vc = mgr.create_card(vid, vcol, "v", due="2026-10-20")
+    check("update_card rejects a bad due", raises(mgr.update_card, vc["id"], due='"onclick=alert(1)'))
+    check("a rejected due leaves the old one", mgr.cards[vc["id"]]["due"] == "2026-10-20")
+    mgr.update_card(vc["id"], due="")
+    check("update_card(due='') clears the due date", mgr.cards[vc["id"]]["due"] is None)
+    check("too many assignees rejected", raises(mgr.update_card, vc["id"], assignees=["person.a"] * 21))
+    check("overlong assignee rejected", raises(mgr.update_card, vc["id"], assignees=["x" * 256]))
+    check("assignees accepted", mgr.update_card(vc["id"], assignees=["person.sam"])["assignees"] == ["person.sam"])
+    check("overlong cover rejected", raises(mgr.update_card, vc["id"], cover="x" * 501))
+    mgr.cards[vc["id"]]["due"] = '"onclick=alert(1)'
+    mgr._sanitize_loaded()
+    check("load resets a bad stored due date", mgr.cards[vc["id"]]["due"] is None)
+
+    # ------------------------------------------------ review fixes (round 2)
+    rb = mgr.create_board("Review fixes", seed=True)
+    rid, rcol = rb["id"], rb["columns"][0]["id"]
+
+    # A call that changes nothing leaves no undo entry (and keeps what could be redone).
+    depth = len(mgr._undo_stack)
+    mgr.create_cards_bulk(rid, rcol, ["", "   "])
+    check("pasting only blank lines adds no undo entry", len(mgr._undo_stack) == depth)
+    mgr.create_card(rid, rcol, "undo me")
+    mgr.undo()
+    check("setup: something to redo", mgr.can_redo is True)
+    mgr.create_cards_bulk(rid, rcol, [""])
+    check("a no-op doesn't clear the redo stack", mgr.can_redo is True)
+    while mgr.can_redo:
+        mgr.redo()
+
+    # A paste that fails part-way announces nothing.
+    n_events = len(hass.bus.events)
+    raises(mgr.create_cards_bulk, rid, rcol, ["ok1", "ok2", "x" * 501])
+    check("a failed paste fires no card_created events",
+          not [e for e in hass.bus.events[n_events:] if e[0] == "hakanban_card_created"])
+    mgr.create_cards_bulk(rid, rcol, ["p1", "p2"])
+    check("a good paste fires one event per card",
+          len([e for e in hass.bus.events[n_events:] if e[0] == "hakanban_card_created"]) == 2)
+
+    # "Done" has two inputs (tick box and to-do status); each keeps the other in step.
+    dc = mgr.create_card(rid, rcol, "done?")
+    mgr.update_card(dc["id"], due_complete=True)
+    check("ticking the box completes the card", mgr.cards[dc["id"]]["status"] == "completed")
+    mgr.update_card(dc["id"], status="needs_action")
+    check("reopening the card clears the tick", mgr.cards[dc["id"]]["due_complete"] is False)
+    mgr.update_card(dc["id"], status="completed")
+    check("completing the card ticks the box", mgr.cards[dc["id"]]["due_complete"] is True)
+    mgr.update_card(dc["id"], due=None)
+    check("clearing the due date doesn't reopen a done card", mgr.cards[dc["id"]]["status"] == "completed")
+    check("a card created as completed is ticked",
+          mgr.create_card(rid, rcol, "born done", status="completed")["due_complete"] is True)
+
+    # Titles can't be blanked on update either.
+    mgr.update_card(dc["id"], title="   ")
+    check("a blank title becomes 'Untitled'", mgr.cards[dc["id"]]["title"] == "Untitled")
+
+    # Due validation: ASCII digits and sane offsets only.
+    for bad in ("2026-01-01T\u0661\u0660:00", "2026-01-01T10:00+99:99", "2026-01-01T10:00+05:75",
+                "\u0662\u0660\u0662\u0666-01-01"):
+        check(f"due rejected: {bad!r}", raises(mgr.create_card, rid, rcol, "d", due=bad))
+    check("a sensible offset is accepted", mgr.create_card(rid, rcol, "d", due="2026-01-01T10:00-05:00")["due"] is not None)
+
+    # Count limits.
+    const_mod = sys.modules["hkpkg.const"]
+    ob = mgr.create_card(rid, rcol, "limits")
+    for _ in range(const_mod.MAX_CHECKLISTS_PER_CARD):
+        mgr.add_checklist(ob["id"], "c")
+    check("too many checklists rejected", raises(mgr.add_checklist, ob["id"], "one more"))
+    cl = mgr.cards[ob["id"]]["checklists"][0]
+    for _ in range(const_mod.MAX_CHECK_ITEMS):
+        mgr.add_check_item(ob["id"], cl["id"], "i")
+    check("too many checklist items rejected", raises(mgr.add_check_item, ob["id"], cl["id"], "one more"))
+    for _ in range(const_mod.MAX_COMMENTS_PER_CARD):
+        mgr.add_comment(ob["id"], "c")
+    check("too many comments rejected", raises(mgr.add_comment, ob["id"], "one more"))
+    # ...but moving a card never fails: automatic move comments just trim the oldest.
+    other_col = rb["columns"][1]["id"]
+    mgr.move_card(ob["id"], other_col)
+    check("a move still works at the comment limit", mgr.cards[ob["id"]]["column_id"] == other_col)
+    check("the comment count stays at the limit", len(mgr.cards[ob["id"]]["comments"]) == const_mod.MAX_COMMENTS_PER_CARD)
+    check("the newest comment is the move", mgr.cards[ob["id"]]["comments"][-1]["text"].startswith("Moved from"))
+    for i in range(const_mod.MAX_COLUMNS_PER_BOARD - len(rb["columns"])):
+        mgr.create_column(rid, f"c{i}")
+    check("too many lists rejected", raises(mgr.create_column, rid, "one more"))
+    saved_boards = dict(mgr.boards)
+    while len(mgr.boards) < const_mod.MAX_BOARDS:
+        mgr.create_board(f"filler {len(mgr.boards)}")
+    check("too many boards rejected", raises(mgr.create_board, "one more"))
+    for bid_ in [b for b in mgr.boards if b not in saved_boards]:
+        mgr.delete_board(bid_)
 
     failed = [n for n, ok in RESULTS if not ok]
     print()

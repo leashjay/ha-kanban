@@ -148,7 +148,9 @@ class HakanbanCalendarEntity(CalendarEntity):
         ]
 
     @callback
-    def _handle_update(self, _board_id: str | None = None) -> None:
+    def _handle_update(self, board_id: str | None = None) -> None:
+        if board_id is not None and board_id != self._board_id:
+            return
         self._refresh()
         self.async_write_ha_state()
 

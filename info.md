@@ -1,5 +1,7 @@
 # Hakanban
 
+> **This is a personal fork** of [neilellis/hakanban](https://github.com/neilellis/hakanban) (`leashjay/ha-kanban`, versions `0.1.8-fork.N`). It adds the open upstream pull requests and a set of security and bug fixes; see [FORK.md](https://github.com/leashjay/ha-kanban/blob/main/FORK.md) for exactly what differs.
+
 **A Trello-style Kanban board that lives *inside* Home Assistant.**
 
 Instead of wrapping an external service like Todoist or Kanboard, Hakanban stores and manages
@@ -33,4 +35,4 @@ Add this repository to **HACS** as a **custom repository** (category **Integrati
 **Hakanban**, restart Home Assistant, then add the **Hakanban** integration from **Settings →
 Devices & Services**. The **Hakanban** panel appears in your sidebar. Full instructions, the
 service/event reference and example automations are in the
-[README](https://github.com/neilellis/hakanban).
+[README](https://github.com/leashjay/ha-kanban).

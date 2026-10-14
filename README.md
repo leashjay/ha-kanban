@@ -1,5 +1,7 @@
 # Hakanban
 
+> **This is a personal fork** of [neilellis/hakanban](https://github.com/neilellis/hakanban) (`leashjay/ha-kanban`, versions `0.1.8-fork.N`). It adds the open upstream pull requests and a set of security and bug fixes; see [FORK.md](https://github.com/leashjay/ha-kanban/blob/main/FORK.md) for exactly what differs. The rest of this page is the upstream documentation.
+
 **A Trello-style Kanban board that lives *inside* Home Assistant.**
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz)
@@ -57,7 +59,8 @@ Hakanban is distributed as a **custom repository**:
 
 1. Open **HACS** in Home Assistant.
 2. Click the **three-dot menu** (top right) → **Custom repositories**.
-3. Add the repository URL `https://github.com/neilellis/hakanban`, choose category
+3. Add the repository URL `https://github.com/leashjay/ha-kanban` (this fork; the original is
+   `https://github.com/neilellis/hakanban`), choose category
    **Integration**, and click **Add**.
 4. Find **Hakanban** in the list and click **Install**.
 5. **Restart** Home Assistant.
@@ -230,7 +233,8 @@ documented in **[docs/PROTOCOL.md](docs/PROTOCOL.md)**.
 ## Contributing
 
 Issues and pull requests are welcome at
-[`neilellis/hakanban`](https://github.com/neilellis/hakanban). Please open an issue to discuss
+[`neilellis/hakanban`](https://github.com/neilellis/hakanban) (upstream) and, for this fork's changes,
+[`leashjay/ha-kanban`](https://github.com/leashjay/ha-kanban). Please open an issue to discuss
 larger changes first, and keep frontend/backend changes consistent with
 [docs/PROTOCOL.md](docs/PROTOCOL.md), which is the shared contract between the integration, the
 websocket API and the frontend.

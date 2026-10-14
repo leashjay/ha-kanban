@@ -18,6 +18,7 @@ import contextlib
 import copy
 import functools
 import re
+from datetime import date
 from typing import Any, Callable, Iterator, TypeVar
 
 from homeassistant.core import HomeAssistant
@@ -33,6 +34,14 @@ from .const import (
     EVENT_CARD_DELETED,
     EVENT_CARD_MOVED,
     EVENT_CARD_UPDATED,
+    MAX_ASSIGNEES,
+    MAX_ASSIGNEE_LEN,
+    MAX_BOARDS,
+    MAX_CARDS_PER_BOARD,
+    MAX_CHECKLISTS_PER_CARD,
+    MAX_CHECK_ITEMS,
+    MAX_COLUMNS_PER_BOARD,
+    MAX_COMMENTS_PER_CARD,
     MAX_LABEL_NAME_LEN,
     MAX_LABELS_PER_BOARD,
     MAX_PASTE_LINES,
@@ -82,6 +91,44 @@ def _check_background(value: str | None) -> str | None:
     return value
 
 
+# A due value is a date or a date-time; the frontend puts it in form fields and the
+# todo/calendar platforms parse it, so nothing else is accepted.
+_DUE = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}"
+    r"(?:T[0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,6})?)?(?:Z|[+-][0-9]{2}:[0-9]{2})?)?"
+)
+
+
+def _check_due(value: str | None) -> str | None:
+    """Return a valid ISO date / date-time string, ``None`` for empty, else raise."""
+    if value in (None, ""):
+        return None
+    ok = isinstance(value, str) and _DUE.fullmatch(value) is not None
+    if ok:
+        try:
+            date.fromisoformat(value[:10])
+        except ValueError:
+            ok = False
+    if ok and len(value) > 10:
+        ok = int(value[11:13]) < 24 and int(value[14:16]) < 60
+        if ok and len(value) > 16 and value[16] == ":":
+            ok = int(value[17:19]) < 60
+        offset = re.search(r"[+-]([0-9]{2}):([0-9]{2})$", value)
+        if ok and offset:
+            ok = int(offset.group(1)) <= 23 and int(offset.group(2)) <= 59
+    if not ok:
+        raise HakanbanError("Due must be a date (YYYY-MM-DD) or date-time (YYYY-MM-DDTHH:MM[:SS])")
+    return value
+
+
+def _check_assignees(value: list[str]) -> list[str]:
+    if len(value) > MAX_ASSIGNEES:
+        raise HakanbanError(f"A card can have at most {MAX_ASSIGNEES} assignees")
+    for who in value:
+        _check_len("Assignee", who, MAX_ASSIGNEE_LEN)
+    return list(value)
+
+
 # Card fields that may be set back to ``None`` through ``update_card``.
 _CLEARABLE = frozenset({"due", "cover"})
 
@@ -108,6 +155,7 @@ def _undoable(method: Callable[..., _T]) -> Callable[..., _T]:
         saved_redo = self._redo_stack
         self._undo_stack.append(snapshot)
         self._redo_stack = []
+        version_before = self._version
         try:
             result = method(self, *args, **kwargs)
         except Exception:
@@ -116,7 +164,15 @@ def _undoable(method: Callable[..., _T]) -> Callable[..., _T]:
             self._undo_stack.pop()
             self._redo_stack = saved_redo
             self._data = snapshot
+            # A cached payload still points into the half-mutated document.
+            self._payload_cache = None
             raise
+        if self._version == version_before:
+            # Nothing was committed (e.g. pasting only blank lines): there is nothing to
+            # undo, and a no-op entry would make the next Ctrl+Z appear to do nothing.
+            self._undo_stack.pop()
+            self._redo_stack = saved_redo
+            return result
         if len(self._undo_stack) > UNDO_HISTORY_LIMIT:
             self._undo_stack.pop(0)
         return result
@@ -137,6 +193,10 @@ class HakanbanData:
         self._data: dict[str, Any] = empty_data()
         # Who is making the current change (set by the websocket/service entry points).
         self._actor: dict[str, str] = {}
+        # Bumped on every change; lets ``full_payload`` be built once per change
+        # instead of once per connected client.
+        self._version = 0
+        self._payload_cache: tuple[int, dict[str, Any]] | None = None
         self._undo_stack: list[dict[str, Any]] = []
         self._redo_stack: list[dict[str, Any]] = []
 
@@ -158,6 +218,11 @@ class HakanbanData:
         value saved by an older version (or edited into ``.storage`` by hand) must not
         be able to carry markup. Anything that fails today's checks is reset.
         """
+        for card in self._data["cards"].values():
+            try:
+                card["due"] = _check_due(card.get("due"))
+            except HakanbanError:
+                card["due"] = None
         for board in self._data["boards"].values():
             try:
                 board["background"] = _check_background(board.get("background"))
@@ -239,8 +304,14 @@ class HakanbanData:
         event: str | None = None,
         event_data: dict[str, Any] | None = None,
     ) -> None:
-        """Persist, fire an optional event, and notify listeners."""
-        self._store.async_schedule_save(self._data)
+        """Persist, fire an optional event, and notify listeners.
+
+        ``board_id`` names the one board that changed so per-board listeners can skip
+        the update; ``None`` means "anything may have changed" (undo/redo, or a
+        change that touches more than one board).
+        """
+        self._version += 1
+        self._store.async_schedule_save(lambda: self._data)
         if event is not None:
             self._fire(event, event_data or {})
         async_dispatcher_send(self.hass, SIGNAL_BOARDS_UPDATED, board_id)
@@ -296,9 +367,23 @@ class HakanbanData:
         cards.sort(key=lambda c: c.get("order", 0))
         return cards
 
-    def board_payload(self, board_id: str) -> dict[str, Any]:
+    def _cards_by_column(self) -> dict[str, list[dict[str, Any]]]:
+        """Every non-archived card grouped by column and sorted, in a single pass."""
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for card in self.cards.values():
+            if not card.get("archived"):
+                grouped.setdefault(card["column_id"], []).append(card)
+        for cards in grouped.values():
+            cards.sort(key=lambda c: c.get("order", 0))
+        return grouped
+
+    def board_payload(
+        self, board_id: str, by_column: dict[str, list[dict[str, Any]]] | None = None
+    ) -> dict[str, Any]:
         """Board with columns -> cards nested, ready for the frontend."""
         board = self._require_board(board_id)
+        if by_column is None:
+            by_column = self._cards_by_column()
         columns = sorted(
             (c for c in board["columns"] if not c.get("archived")),
             key=lambda c: c.get("order", 0),
@@ -310,20 +395,26 @@ class HakanbanData:
             "archived": board.get("archived", False),
             "labels": board.get("label_defs", []),
             "columns": [
-                {**col, "cards": self.cards_in_column(col["id"])} for col in columns
+                {**col, "cards": by_column.get(col["id"], [])} for col in columns
             ],
         }
 
     def full_payload(self) -> dict[str, Any]:
-        return {
+        """Everything the frontend shows; cached until the next change."""
+        if self._payload_cache and self._payload_cache[0] == self._version:
+            return self._payload_cache[1]
+        by_column = self._cards_by_column()
+        payload = {
             "boards": [
-                self.board_payload(bid)
+                self.board_payload(bid, by_column)
                 for bid, b in self.boards.items()
                 if not b.get("archived")
             ],
             "can_undo": self.can_undo,
             "can_redo": self.can_redo,
         }
+        self._payload_cache = (self._version, payload)
+        return payload
 
     # ---------------------------------------------------------------- boards
     def _unique_board_title(self, title: str, exclude_id: str | None = None) -> str:
@@ -344,6 +435,8 @@ class HakanbanData:
     def create_board(
         self, title: str, background: str | None = None, seed: bool = False
     ) -> dict[str, Any]:
+        if len(self.boards) >= MAX_BOARDS:
+            raise HakanbanError(f"At most {MAX_BOARDS} boards are allowed")
         board_id = _uid()
         board = {
             "id": board_id,
@@ -384,6 +477,8 @@ class HakanbanData:
 
     # --------------------------------------------------------------- columns
     def _add_column(self, board: dict[str, Any], title: str) -> dict[str, Any]:
+        if len(board["columns"]) >= MAX_COLUMNS_PER_BOARD:
+            raise HakanbanError(f"A board can have at most {MAX_COLUMNS_PER_BOARD} lists")
         orders = [c.get("order", 0) for c in board["columns"]]
         column = {
             "id": _uid(),
@@ -444,6 +539,8 @@ class HakanbanData:
     def _new_card(self, board: dict[str, Any], column_id: str, title: str, **fields: Any) -> dict[str, Any]:
         title = _check_len("Card title", title, MAX_TITLE_LEN)
         description = _check_len("Description", fields.get("description", ""), MAX_TEXT_LEN)
+        if sum(1 for c in self.cards.values() if c["board_id"] == board["id"]) >= MAX_CARDS_PER_BOARD:
+            raise HakanbanError(f"A board can have at most {MAX_CARDS_PER_BOARD} cards")
         board["card_seq"] = board.get("card_seq", 0) + 1
         existing = self.cards_in_column(column_id)
         order = (existing[-1]["order"] + ORDER_STEP) if existing else 0
@@ -457,13 +554,13 @@ class HakanbanData:
             "title": title.strip() or "Untitled",
             "description": description,
             "labels": self._clean_labels(board, fields.get("labels", [])),
-            "assignees": list(fields.get("assignees", [])),
-            "due": fields.get("due"),
-            "due_complete": fields.get("due_complete", False),
+            "assignees": _check_assignees(fields.get("assignees", [])),
+            "due": _check_due(fields.get("due")),
+            "due_complete": fields.get("due_complete", fields.get("status") == STATUS_COMPLETED),
             "status": fields.get("status", STATUS_NEEDS_ACTION),
             "checklists": [],
             "comments": [],
-            "cover": fields.get("cover"),
+            "cover": _check_len("Cover", fields.get("cover"), MAX_TITLE_LEN) or None,
             "archived": False,
             "created": _now(),
             "updated": _now(),
@@ -492,10 +589,11 @@ class HakanbanData:
         created: list[dict[str, Any]] = []
         for raw in titles:
             title = raw.strip()
-            if not title:
-                continue
-            card = self._new_card(board, column_id, title)
-            created.append(card)
+            if title:
+                created.append(self._new_card(board, column_id, title))
+        # Only now is the paste known to be valid; firing earlier would announce cards that
+        # a later bad title then rolls back.
+        for card in created:
             self._fire(
                 EVENT_CARD_CREATED,
                 {"board_id": board_id, "column_id": column_id, "card_id": card["id"], "title": card["title"]},
@@ -509,13 +607,25 @@ class HakanbanData:
         card = self._require_card(card_id)
         was_completed = card.get("status") == STATUS_COMPLETED
         if fields.get("title") is not None:
-            _check_len("Card title", fields["title"], MAX_TITLE_LEN)
+            fields["title"] = _check_len("Card title", fields["title"], MAX_TITLE_LEN).strip() or "Untitled"
+        # "Done" is one fact with two inputs (the board's tick box sets ``due_complete``,
+        # the to-do platform and Assist set ``status``); setting either keeps the other in step.
+        if fields.get("due_complete") is not None and fields.get("status") is None:
+            fields["status"] = STATUS_COMPLETED if fields["due_complete"] else STATUS_NEEDS_ACTION
+        elif fields.get("status") is not None and fields.get("due_complete") is None:
+            fields["due_complete"] = fields["status"] == STATUS_COMPLETED
         if fields.get("description") is not None:
             _check_len("Description", fields["description"], MAX_TEXT_LEN)
         if fields.get("labels") is not None:
             fields["labels"] = self._clean_labels(
                 self._require_board(card["board_id"]), fields["labels"]
             )
+        if "due" in fields:
+            fields["due"] = _check_due(fields["due"])
+        if fields.get("assignees") is not None:
+            fields["assignees"] = _check_assignees(fields["assignees"])
+        if fields.get("cover") is not None:
+            _check_len("Cover", fields["cover"], MAX_TITLE_LEN)
         for key in (
             "title", "description", "labels", "assignees", "due",
             "due_complete", "status", "cover", "archived",
@@ -576,6 +686,10 @@ class HakanbanData:
                     "move_to": to_label,
                 }
             )
+            # Moves add a comment each time; keep only the newest so they can't grow forever.
+            comments = card["comments"]
+            if len(comments) > MAX_COMMENTS_PER_CARD:
+                del comments[: len(comments) - MAX_COMMENTS_PER_CARD]
 
         if from_board_id != board_id:
             # Number the card on its new board (numbers are per-board, so keeping the
@@ -597,7 +711,9 @@ class HakanbanData:
         card["updated"] = _now()
 
         self._commit(
-            board_id, EVENT_CARD_MOVED,
+            # A cross-board move changes two boards, so tell every listener.
+            board_id if from_board_id == board_id else None,
+            EVENT_CARD_MOVED,
             {
                 "board_id": board_id,
                 "card_id": card_id,
@@ -660,6 +776,8 @@ class HakanbanData:
     def add_comment(self, card_id: str, text: str, author: str | None = None) -> dict[str, Any]:
         card = self._require_card(card_id)
         text = _check_len("Comment", text, MAX_TEXT_LEN)
+        if len(card.get("comments", [])) >= MAX_COMMENTS_PER_CARD:
+            raise HakanbanError(f"A card can have at most {MAX_COMMENTS_PER_CARD} comments")
         author = author or self._actor.get("user") or "Home Assistant"
         comment = {"id": _uid(), "author": author, "ts": _now(), "text": text}
         card.setdefault("comments", []).append(comment)
@@ -675,6 +793,8 @@ class HakanbanData:
     def add_checklist(self, card_id: str, title: str) -> dict[str, Any]:
         card = self._require_card(card_id)
         title = _check_len("Checklist title", title, MAX_TITLE_LEN)
+        if len(card.get("checklists", [])) >= MAX_CHECKLISTS_PER_CARD:
+            raise HakanbanError(f"A card can have at most {MAX_CHECKLISTS_PER_CARD} checklists")
         checklist = {"id": _uid(), "title": title or "Checklist", "items": []}
         card.setdefault("checklists", []).append(checklist)
         self._commit(card["board_id"])
@@ -685,6 +805,8 @@ class HakanbanData:
         card = self._require_card(card_id)
         for checklist in card.get("checklists", []):
             if checklist["id"] == checklist_id:
+                if len(checklist["items"]) >= MAX_CHECK_ITEMS:
+                    raise HakanbanError(f"A checklist can have at most {MAX_CHECK_ITEMS} items")
                 item = {"id": _uid(), "text": _check_len("Item", text, MAX_TITLE_LEN), "done": False}
                 checklist["items"].append(item)
                 self._commit(card["board_id"])

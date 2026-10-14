@@ -7,7 +7,7 @@ The todo entities and the websocket API are thin views over this document.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
@@ -31,11 +31,22 @@ async def _async_migrate(
     return old_data
 
 
+class _MigratingStore(Store):
+    """``Store`` with the schema migration hook Home Assistant expects subclasses to provide.
+
+    Home Assistant only calls it when the stored major version differs from
+    ``STORAGE_VERSION``; without an override that case raises ``NotImplementedError``.
+    """
+
+    async def _async_migrate_func(self, old_major_version, old_minor_version, old_data):
+        return await _async_migrate(old_major_version, old_minor_version, old_data)
+
+
 class HakanbanStore:
     """Debounced JSON store wrapper."""
 
     def __init__(self, hass: HomeAssistant) -> None:
-        self._store: Store[dict[str, Any]] = Store(
+        self._store: Store[dict[str, Any]] = _MigratingStore(
             hass,
             STORAGE_VERSION,
             STORAGE_KEY,
@@ -53,9 +64,15 @@ class HakanbanStore:
         data.setdefault("cards", {})
         return data
 
-    def async_schedule_save(self, data: dict[str, Any]) -> None:
-        """Schedule a debounced save of the full document."""
-        self._store.async_delay_save(lambda: data, SAVE_DELAY)
+    def async_schedule_save(self, data_func: Callable[[], dict[str, Any]]) -> None:
+        """Schedule a debounced save of the document returned by ``data_func``.
+
+        A callable rather than the document itself: undo, redo and a rolled-back
+        mutation all replace the manager's document object, and the delayed save
+        must write whichever one is current when it fires, not the one that was
+        current when it was scheduled.
+        """
+        self._store.async_delay_save(data_func, SAVE_DELAY)
 
     async def async_save(self, data: dict[str, Any]) -> None:
         """Write immediately (used on unload)."""

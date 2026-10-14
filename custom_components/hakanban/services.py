@@ -5,6 +5,7 @@ from __future__ import annotations
 import voluptuous as vol
 
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.exceptions import ServiceValidationError
 import homeassistant.helpers.config_validation as cv
 
 from .const import DATA_MANAGER, DOMAIN
@@ -76,7 +77,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                 due=call.data.get("due"),
             )
         except HakanbanError as err:
-            raise vol.Invalid(str(err)) from err
+            raise ServiceValidationError(str(err)) from err
         return {"card_id": card["id"], "number": card["number"]}
 
     def _with_actor(handler):
@@ -102,30 +103,33 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                 to_board=call.data.get("to_board"),
             )
         except HakanbanError as err:
-            raise vol.Invalid(str(err)) from err
+            raise ServiceValidationError(str(err)) from err
 
     async def update_card(call: ServiceCall) -> None:
         fields = {k: v for k, v in call.data.items() if k != "card_id"}
         try:
             _manager().update_card(call.data["card_id"], **fields)
         except HakanbanError as err:
-            raise vol.Invalid(str(err)) from err
+            raise ServiceValidationError(str(err)) from err
 
     async def add_comment(call: ServiceCall) -> None:
         try:
             _manager().add_comment(call.data["card_id"], call.data["text"])
         except HakanbanError as err:
-            raise vol.Invalid(str(err)) from err
+            raise ServiceValidationError(str(err)) from err
 
     async def create_board(call: ServiceCall) -> dict:
-        board = _manager().create_board(call.data["title"])
+        try:
+            board = _manager().create_board(call.data["title"])
+        except HakanbanError as err:
+            raise ServiceValidationError(str(err)) from err
         return {"board_id": board["id"]}
 
     async def create_column(call: ServiceCall) -> dict:
         try:
             column = _manager().create_column(call.data["board_id"], call.data["title"])
         except HakanbanError as err:
-            raise vol.Invalid(str(err)) from err
+            raise ServiceValidationError(str(err)) from err
         return {"column_id": column["id"]}
 
     hass.services.async_register(

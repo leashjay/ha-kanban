@@ -70,7 +70,7 @@ async def async_register_frontend(hass: HomeAssistant) -> None:
         async_when_setup(hass, "lovelace", _on_lovelace_ready)
 
     # Register the full-page sidebar panel (idempotent — remove first if present).
-    frontend.async_remove_panel(hass, PANEL_URL_PATH)
+    frontend.async_remove_panel(hass, PANEL_URL_PATH, warn_if_unknown=False)
     await panel_custom.async_register_panel(
         hass,
         frontend_url_path=PANEL_URL_PATH,

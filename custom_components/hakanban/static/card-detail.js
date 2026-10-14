@@ -7,6 +7,7 @@ import {
   renderMarkdown,
   formatDue,
   labelStyle,
+  toDatetimeLocal,
 } from "./util.js";
 
 const PALETTE = ["#61bd4f", "#f2d600", "#ff9f1a", "#eb5a46", "#c377e0", "#0079bf", "#00c2e0", "#51e898", "#ff78cb", "#344563"];
@@ -113,13 +114,12 @@ export class HakanbanCardDetail extends HTMLElement {
     const c = this._card;
     const b = this._board;
     if (!c) return;
-    const labelById = Object.fromEntries((b.labels || []).map((l) => [l.id, l]));
     const selected = new Set(c.labels || []);
 
     const labelsHtml = (b.labels || [])
       .map((l) => {
         const sel = selected.has(l.id) ? "selected" : "";
-        return `<span class="hk-label-chip ${sel}" data-label="${l.id}" style="${labelStyle(l.color)}">${escapeHtml(l.name || "·")}</span>`;
+        return `<span class="hk-label-chip ${sel}" data-label="${escapeHtml(l.id)}" style="${labelStyle(l.color)}">${escapeHtml(l.name || "·")}</span>`;
       })
       .join("");
 
@@ -130,11 +130,11 @@ export class HakanbanCardDetail extends HTMLElement {
         const items = cl.items
           .map(
             (i) =>
-              `<label class="hk-check-item ${i.done ? "done" : ""}"><input type="checkbox" data-check="${cl.id}:${i.id}" ${i.done ? "checked" : ""}><span>${escapeHtml(i.text)}</span></label>`
+              `<label class="hk-check-item ${i.done ? "done" : ""}"><input type="checkbox" data-check="${escapeHtml(cl.id)}:${escapeHtml(i.id)}" ${i.done ? "checked" : ""}><span>${escapeHtml(i.text)}</span></label>`
           )
           .join("");
         return `<div class="hk-section"><h3>${escapeHtml(cl.title)} (${done}/${total})</h3>${items}
-          <div class="hk-row"><input type="text" class="hk-add-check" data-cl="${cl.id}" placeholder="Add an item…"></div></div>`;
+          <div class="hk-row"><input type="text" class="hk-add-check" maxlength="500" data-cl="${escapeHtml(cl.id)}" placeholder="Add an item…"></div></div>`;
       })
       .join("");
 
@@ -148,16 +148,16 @@ export class HakanbanCardDetail extends HTMLElement {
       .join("");
 
     const columnsOptions = (b.columns || [])
-      .map((col) => `<option value="${col.id}" ${col.id === c.column_id ? "selected" : ""}>${escapeHtml(col.title)}</option>`)
+      .map((col) => `<option value="${escapeHtml(col.id)}" ${col.id === c.column_id ? "selected" : ""}>${escapeHtml(col.title)}</option>`)
       .join("");
 
-    const dueLocal = c.due ? String(c.due).slice(0, 16) : "";
+    const dueLocal = toDatetimeLocal(c.due);
 
     this.shadowRoot.innerHTML = `
       <style>${STYLES}</style>
       <div class="hk-modal-back">
         <div class="hk-modal" role="dialog" aria-modal="true">
-          <h2><textarea class="hk-title-edit" rows="1">${escapeHtml(c.title)}</textarea></h2>
+          <h2><textarea class="hk-title-edit" rows="1" maxlength="500">${escapeHtml(c.title)}</textarea></h2>
           <div class="hk-meta">#${c.number} · in <strong>${escapeHtml((b.columns.find((x) => x.id === c.column_id) || {}).title || "")}</strong></div>
 
           <div class="hk-section">
@@ -166,7 +166,7 @@ export class HakanbanCardDetail extends HTMLElement {
               <span class="hk-label-chip" id="hk-add-label" style="background:var(--hk-divider);color:var(--hk-text)">+ New</span>
             </div>
             <div class="hk-row" id="hk-new-label" style="display:none;margin-top:8px">
-              <input type="text" id="hk-label-name" placeholder="Label name">
+              <input type="text" id="hk-label-name" maxlength="60" placeholder="Label name">
               <span id="hk-label-palette"></span>
             </div>
           </div>
@@ -174,7 +174,7 @@ export class HakanbanCardDetail extends HTMLElement {
           <div class="hk-section">
             <h3>Due date</h3>
             <div class="hk-row">
-              <input type="datetime-local" id="hk-due" value="${dueLocal}">
+              <input type="datetime-local" id="hk-due" value="${escapeHtml(dueLocal)}">
               <label><input type="checkbox" id="hk-due-complete" ${c.due_complete ? "checked" : ""}> Complete</label>
               <button class="hk-btn secondary" id="hk-due-clear">Clear</button>
             </div>
@@ -184,7 +184,7 @@ export class HakanbanCardDetail extends HTMLElement {
             <h3>Description</h3>
             ${
               this._editingDesc
-                ? `<textarea class="hk-desc-edit" id="hk-desc">${escapeHtml(c.description || "")}</textarea>
+                ? `<textarea class="hk-desc-edit" id="hk-desc" maxlength="20000">${escapeHtml(c.description || "")}</textarea>
                    <div class="hk-row" style="margin-top:6px"><button class="hk-btn" id="hk-desc-save">Save</button><button class="hk-btn secondary" id="hk-desc-cancel">Cancel</button></div>`
                 : `<div class="hk-desc-render" id="hk-desc-render">${renderMarkdown(c.description) || '<span style="color:var(--hk-subtle)">Add a more detailed description…</span>'}</div>`
             }
@@ -195,7 +195,7 @@ export class HakanbanCardDetail extends HTMLElement {
 
           <div class="hk-section">
             <h3>Activity</h3>
-            <div class="hk-row"><input type="text" id="hk-comment" placeholder="Write a comment…" style="flex:1"><button class="hk-btn" id="hk-comment-add">Comment</button></div>
+            <div class="hk-row"><input type="text" id="hk-comment" maxlength="20000" placeholder="Write a comment…" style="flex:1"><button class="hk-btn" id="hk-comment-add">Comment</button></div>
             ${commentsHtml}
           </div>
 
@@ -272,14 +272,21 @@ export class HakanbanCardDetail extends HTMLElement {
       api.updateCard(c.id, { due_complete: e.target.checked })
     );
     $("#hk-due-clear").addEventListener("click", () =>
-      api.updateCard(c.id, { due: null, due_complete: false })
+      api.updateCard(c.id, { due: null })
     );
 
     // Description
     if (this._editingDesc) {
       $("#hk-desc-save").addEventListener("click", () => {
-        this._editingDesc = false;
-        api.updateCard(c.id, { description: $("#hk-desc").value });
+        // Stay in edit mode until the server accepts it, so a rejected save (too long)
+        // doesn't throw the text away.
+        api.updateCard(c.id, { description: $("#hk-desc").value }).then(
+          () => {
+            this._editingDesc = false;
+            this.render();
+          },
+          () => {} // already reported through api.notify
+        );
       });
       $("#hk-desc-cancel").addEventListener("click", () => {
         this._editingDesc = false;

@@ -18,6 +18,9 @@ export class HakanbanPanel extends HTMLElement {
     this._showFilter = false;
     this._built = false;
     this._displayOpts = loadDisplayOpts();
+    // Surface server-side rejections through Home Assistant's own toast.
+    this._notify = (message) =>
+      this.dispatchEvent(new CustomEvent("hass-notification", { detail: { message }, bubbles: true, composed: true }));
   }
 
   // Optional: lock the initial board (used by the Lovelace card config).
@@ -29,7 +32,7 @@ export class HakanbanPanel extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     if (!this._api) {
-      this._api = new HakanbanApi(hass);
+      this._api = new HakanbanApi(hass, this._notify);
       this._start();
     } else {
       this._api.setHass(hass);
@@ -39,7 +42,7 @@ export class HakanbanPanel extends HTMLElement {
 
   connectedCallback() {
     if (this._hass && !this._api) {
-      this._api = new HakanbanApi(this._hass);
+      this._api = new HakanbanApi(this._hass, this._notify);
       this._start();
     } else if (this._api && this._built) {
       // Lovelace detaches and re-attaches cards on view/tab switches, and
@@ -94,6 +97,11 @@ export class HakanbanPanel extends HTMLElement {
   _subscribe() {
     if (!this._api || this._unsub) return;
     this._unsub = this._api.subscribe((payload) => {
+      // Many writes change nothing the UI shows (re-saving a value, an automation that
+      // sets what is already set); don't rebuild the whole board for those.
+      const key = JSON.stringify(payload);
+      if (key === this._lastPayload) return;
+      this._lastPayload = key;
       this._data = payload;
       // Resolve the initial board: explicit config > localStorage > first board.
       if (this._initialBoardWant) {
@@ -106,7 +114,18 @@ export class HakanbanPanel extends HTMLElement {
       if (!this._activeBoardId || !payload.boards.find((b) => b.id === this._activeBoardId)) {
         this._activeBoardId = payload.boards[0]?.id || null;
       }
-      this._renderToolbar();
+      // The toolbar only depends on the board list, labels, undo state and which board is
+      // active; rebuilding it on every card change would drop focus from the search box.
+      const toolbarKey = JSON.stringify([
+        payload.boards.map((b) => [b.id, b.title, b.labels]),
+        this._activeBoardId,
+        payload.can_undo,
+        payload.can_redo,
+      ]);
+      if (toolbarKey !== this._toolbarKey) {
+        this._toolbarKey = toolbarKey;
+        this._renderToolbar();
+      }
       this._renderBoard();
     });
   }
@@ -137,7 +156,7 @@ export class HakanbanPanel extends HTMLElement {
     const tabs = boards
       .map(
         (b) =>
-          `<button class="hk-tab ${b.id === this._activeBoardId ? "active" : ""}" data-board="${b.id}">${escapeHtml(b.title)}</button>`
+          `<button class="hk-tab ${b.id === this._activeBoardId ? "active" : ""}" data-board="${escapeHtml(b.id)}">${escapeHtml(b.title)}</button>`
       )
       .join("");
     const canUndo = !!this._data?.can_undo;
@@ -209,7 +228,7 @@ export class HakanbanPanel extends HTMLElement {
     const chips = (board.labels || [])
       .map(
         (l) =>
-          `<span class="hk-label-chip ${this._activeLabels.has(l.id) ? "selected" : ""}" data-flabel="${l.id}" style="${labelStyle(l.color)}">${escapeHtml(l.name || "·")}</span>`
+          `<span class="hk-label-chip ${this._activeLabels.has(l.id) ? "selected" : ""}" data-flabel="${escapeHtml(l.id)}" style="${labelStyle(l.color)}">${escapeHtml(l.name || "·")}</span>`
       )
       .join("");
     bar.innerHTML = `<div class="hk-row" style="padding:8px 16px;border-bottom:1px solid var(--hk-divider)"><strong style="margin-right:6px">Labels:</strong>${chips || "<em>No labels yet</em>"} <button class="hk-btn secondary" data-clearf>Clear</button></div>`;

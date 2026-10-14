@@ -42,7 +42,7 @@ export function cardHtml(card, labelById, opts) {
   const badgesHtml = badges.length ? `<div class="hk-card-badges">${badges.join("")}</div>` : "";
   const completed = card.status === "completed" ? "completed" : "";
   return `
-      <div class="hk-card ${completed}" draggable="true" data-card="${card.id}" data-col="${card.column_id}">
+      <div class="hk-card ${completed}" draggable="true" data-card="${escapeHtml(card.id)}" data-col="${escapeHtml(card.column_id)}">
         ${(opts.showLabels && labels) ? `<div class="hk-card-labels">${labels}</div>` : ""}
         ${opts.showTitle ? `<div class="hk-card-title">${escapeHtml(card.title)}</div>` : ""}
         ${descHtml}
@@ -62,7 +62,7 @@ function checklistItemsHtml(card) {
               cl.items
                 .map(
                   (i) =>
-                    `<label class="hk-check-inline ${i.done ? "done" : ""}" data-card="${card.id}"><input type="checkbox" data-check="${cl.id}:${i.id}" ${i.done ? "checked" : ""}><span>${escapeHtml(i.text)}</span></label>`
+                    `<label class="hk-check-inline ${i.done ? "done" : ""}" data-card="${escapeHtml(card.id)}"><input type="checkbox" data-check="${escapeHtml(cl.id)}:${escapeHtml(i.id)}" ${i.done ? "checked" : ""}><span>${escapeHtml(i.text)}</span></label>`
                 )
                 .join("")
             )
