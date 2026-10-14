@@ -79,19 +79,27 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             raise vol.Invalid(str(err)) from err
         return {"card_id": card["id"], "number": card["number"]}
 
+    def _with_actor(handler):
+        """Run a service handler with the calling user recorded as the actor."""
+
+        async def wrapper(call: ServiceCall):
+            user_id = call.context.user_id
+            name = None
+            if user_id:
+                user = await hass.auth.async_get_user(user_id)
+                name = user.name if user else None
+            with _manager().acting_as(user_id, name):
+                return await handler(call)
+
+        return wrapper
+
     async def move_card(call: ServiceCall) -> None:
-        user = None
-        if call.context.user_id:
-            user_obj = await hass.auth.async_get_user(call.context.user_id)
-            if user_obj:
-                user = user_obj.name
         try:
             _manager().move_card(
                 call.data["card_id"],
                 call.data["to_column"],
                 position=call.data.get("position"),
                 to_board=call.data.get("to_board"),
-                user=user,
             )
         except HakanbanError as err:
             raise vol.Invalid(str(err)) from err
@@ -121,18 +129,18 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         return {"column_id": column["id"]}
 
     hass.services.async_register(
-        DOMAIN, SERVICE_ADD_CARD, add_card, ADD_CARD_SCHEMA,
+        DOMAIN, SERVICE_ADD_CARD, _with_actor(add_card), ADD_CARD_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
-    hass.services.async_register(DOMAIN, SERVICE_MOVE_CARD, move_card, MOVE_CARD_SCHEMA)
-    hass.services.async_register(DOMAIN, SERVICE_UPDATE_CARD, update_card, UPDATE_CARD_SCHEMA)
-    hass.services.async_register(DOMAIN, SERVICE_ADD_COMMENT, add_comment, ADD_COMMENT_SCHEMA)
+    hass.services.async_register(DOMAIN, SERVICE_MOVE_CARD, _with_actor(move_card), MOVE_CARD_SCHEMA)
+    hass.services.async_register(DOMAIN, SERVICE_UPDATE_CARD, _with_actor(update_card), UPDATE_CARD_SCHEMA)
+    hass.services.async_register(DOMAIN, SERVICE_ADD_COMMENT, _with_actor(add_comment), ADD_COMMENT_SCHEMA)
     hass.services.async_register(
-        DOMAIN, SERVICE_CREATE_BOARD, create_board, CREATE_BOARD_SCHEMA,
+        DOMAIN, SERVICE_CREATE_BOARD, _with_actor(create_board), CREATE_BOARD_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(
-        DOMAIN, SERVICE_CREATE_COLUMN, create_column, CREATE_COLUMN_SCHEMA,
+        DOMAIN, SERVICE_CREATE_COLUMN, _with_actor(create_column), CREATE_COLUMN_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
 

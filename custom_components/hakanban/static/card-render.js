@@ -1,7 +1,7 @@
 // Pure card HTML rendering — extracted from board-view.js so the board
 // component stays a thin shell. No DOM, no state; just (card, opts) -> HTML.
 
-import { escapeHtml, formatDue, dueState, contrastText, renderMarkdown } from "./util.js";
+import { escapeHtml, formatDue, dueState, labelStyle, renderMarkdown } from "./util.js";
 
 // Build the HTML for a single card given the card object, a label-id map,
 // and the normalised display options.
@@ -11,7 +11,7 @@ export function cardHtml(card, labelById, opts) {
     .filter(Boolean)
     .map(
       (l) =>
-        `<span class="hk-label" style="background:${l.color};color:${contrastText(l.color)}">${escapeHtml(l.name || "")}</span>`
+        `<span class="hk-label" style="${labelStyle(l.color)}">${escapeHtml(l.name || "")}</span>`
     )
     .join("");
 

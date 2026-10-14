@@ -14,10 +14,11 @@ The todo entities and the websocket API are thin readers/writers on top of this.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import functools
 import re
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Iterator, TypeVar
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_send
@@ -32,6 +33,11 @@ from .const import (
     EVENT_CARD_DELETED,
     EVENT_CARD_MOVED,
     EVENT_CARD_UPDATED,
+    MAX_LABEL_NAME_LEN,
+    MAX_LABELS_PER_BOARD,
+    MAX_PASTE_LINES,
+    MAX_TEXT_LEN,
+    MAX_TITLE_LEN,
     ORDER_STEP,
     SIGNAL_BOARDS_UPDATED,
     STATUS_COMPLETED,
@@ -49,6 +55,42 @@ def _uid() -> str:
 
 def _now() -> str:
     return dt_util.utcnow().isoformat()
+
+
+# Colours and backgrounds end up inside a ``style="..."`` attribute in the frontend, so
+# only accept shapes that can't carry markup or extra CSS (no quotes, ``url()``, ``;``).
+_HEX_COLOR = re.compile(r"#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})")
+_GRADIENT = re.compile(
+    r"linear-gradient\(\d{1,3}deg,\s*#[0-9a-fA-F]{3,8},\s*#[0-9a-fA-F]{3,8}\)"
+)
+
+
+def _check_color(value: str) -> str:
+    if not isinstance(value, str) or not _HEX_COLOR.fullmatch(value):
+        raise HakanbanError("Colour must be a hex value like #61bd4f")
+    return value
+
+
+def _check_background(value: str | None) -> str | None:
+    """A board background is empty (none), a hex colour, or a two-stop gradient."""
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str) or not (
+        _HEX_COLOR.fullmatch(value) or _GRADIENT.fullmatch(value)
+    ):
+        raise HakanbanError("Background must be a hex colour or a linear-gradient")
+    return value
+
+
+# Card fields that may be set back to ``None`` through ``update_card``.
+_CLEARABLE = frozenset({"due", "cover"})
+
+
+def _check_len(what: str, value: str | None, limit: int) -> str:
+    value = value or ""
+    if len(value) > limit:
+        raise HakanbanError(f"{what} is too long ({len(value)} > {limit} characters)")
+    return value
 
 
 def _undoable(method: Callable[..., _T]) -> Callable[..., _T]:
@@ -69,8 +111,11 @@ def _undoable(method: Callable[..., _T]) -> Callable[..., _T]:
         try:
             result = method(self, *args, **kwargs)
         except Exception:
+            # Roll the document back too, not just the history: a method that fails
+            # after it started mutating must not leave a half-applied change behind.
             self._undo_stack.pop()
             self._redo_stack = saved_redo
+            self._data = snapshot
             raise
         if len(self._undo_stack) > UNDO_HISTORY_LIMIT:
             self._undo_stack.pop(0)
@@ -90,18 +135,39 @@ class HakanbanData:
         self.hass = hass
         self._store = store
         self._data: dict[str, Any] = empty_data()
+        # Who is making the current change (set by the websocket/service entry points).
+        self._actor: dict[str, str] = {}
         self._undo_stack: list[dict[str, Any]] = []
         self._redo_stack: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------ load
     async def async_load(self) -> None:
         self._data = await self._store.async_load()
+        self._sanitize_loaded()
         if not self._data["boards"]:
             # First run: seed a starter board so the panel isn't empty.
             self.create_board("My Board", seed=True)
         # The loaded/seeded state is the baseline — nothing to undo into yet.
         self._undo_stack.clear()
         self._redo_stack.clear()
+
+    def _sanitize_loaded(self) -> None:
+        """Repair values stored before they were validated.
+
+        Colours and backgrounds are written into inline styles by the frontend, so a
+        value saved by an older version (or edited into ``.storage`` by hand) must not
+        be able to carry markup. Anything that fails today's checks is reset.
+        """
+        for board in self._data["boards"].values():
+            try:
+                board["background"] = _check_background(board.get("background"))
+            except HakanbanError:
+                board["background"] = None
+            for label in board.get("label_defs", []):
+                try:
+                    _check_color(label.get("color"))
+                except HakanbanError:
+                    label["color"] = "#838c91"
 
     # ------------------------------------------------------------------ undo
     @property
@@ -176,8 +242,28 @@ class HakanbanData:
         """Persist, fire an optional event, and notify listeners."""
         self._store.async_schedule_save(self._data)
         if event is not None:
-            self.hass.bus.async_fire(event, event_data or {})
+            self._fire(event, event_data or {})
         async_dispatcher_send(self.hass, SIGNAL_BOARDS_UPDATED, board_id)
+
+    @contextlib.contextmanager
+    def acting_as(self, user_id: str | None, name: str | None) -> Iterator[None]:
+        """Attribute mutations made inside the block to a Home Assistant user.
+
+        Comments default their author to this user and bus events carry
+        ``user_id`` / ``user`` so automations can tell who moved or completed a card.
+        The handlers that use it are synchronous, so nothing can interleave.
+        """
+        previous = self._actor
+        self._actor = {
+            k: v for k, v in (("user_id", user_id), ("user", name)) if v
+        }
+        try:
+            yield
+        finally:
+            self._actor = previous
+
+    def _fire(self, event: str, data: dict[str, Any]) -> None:
+        self.hass.bus.async_fire(event, {**data, **self._actor})
 
     # ----------------------------------------------------------------- query
     def column_ids(self) -> list[tuple[str, str]]:
@@ -242,7 +328,7 @@ class HakanbanData:
     # ---------------------------------------------------------------- boards
     def _unique_board_title(self, title: str, exclude_id: str | None = None) -> str:
         """Return ``title``, appending `` (n)`` so it doesn't clash with another board."""
-        title = (title or "").strip() or "Untitled board"
+        title = _check_len("Board title", title, MAX_TITLE_LEN).strip() or "Untitled board"
         existing = {
             b["title"] for bid, b in self.boards.items() if bid != exclude_id
         }
@@ -262,7 +348,7 @@ class HakanbanData:
         board = {
             "id": board_id,
             "title": self._unique_board_title(title),
-            "background": background,
+            "background": _check_background(background),
             "archived": False,
             "label_defs": [dict(label) for label in DEFAULT_LABELS],
             "columns": [],
@@ -282,7 +368,7 @@ class HakanbanData:
         if changes.get("title") is not None:
             board["title"] = self._unique_board_title(changes["title"], exclude_id=board_id)
         if "background" in changes:
-            board["background"] = changes["background"]  # None clears it (no background)
+            board["background"] = _check_background(changes["background"])  # None clears it
         if changes.get("archived") is not None:
             board["archived"] = changes["archived"]
         self._commit(board_id, EVENT_BOARD_CHANGED, {"board_id": board_id, "action": "updated"})
@@ -301,7 +387,7 @@ class HakanbanData:
         orders = [c.get("order", 0) for c in board["columns"]]
         column = {
             "id": _uid(),
-            "title": title or "New list",
+            "title": _check_len("List title", title, MAX_TITLE_LEN) or "New list",
             "order": (max(orders) + ORDER_STEP) if orders else 0,
             "archived": False,
         }
@@ -319,6 +405,8 @@ class HakanbanData:
     def update_column(self, board_id: str, column_id: str, **changes: Any) -> dict[str, Any]:
         board = self._require_board(board_id)
         column = self._column(board, column_id)
+        if changes.get("title") is not None:
+            _check_len("List title", changes["title"], MAX_TITLE_LEN)
         for key in ("title", "archived"):
             if key in changes and changes[key] is not None:
                 column[key] = changes[key]
@@ -347,7 +435,15 @@ class HakanbanData:
         self._commit(board_id, EVENT_BOARD_CHANGED, {"board_id": board_id, "action": "column_moved"})
 
     # ----------------------------------------------------------------- cards
+    @staticmethod
+    def _clean_labels(board: dict[str, Any], labels: list[str]) -> list[str]:
+        """Keep only label ids that exist on ``board`` (in order, without repeats)."""
+        known = {label["id"] for label in board.get("label_defs", [])}
+        return [l for l in dict.fromkeys(labels) if l in known]
+
     def _new_card(self, board: dict[str, Any], column_id: str, title: str, **fields: Any) -> dict[str, Any]:
+        title = _check_len("Card title", title, MAX_TITLE_LEN)
+        description = _check_len("Description", fields.get("description", ""), MAX_TEXT_LEN)
         board["card_seq"] = board.get("card_seq", 0) + 1
         existing = self.cards_in_column(column_id)
         order = (existing[-1]["order"] + ORDER_STEP) if existing else 0
@@ -359,8 +455,8 @@ class HakanbanData:
             "order": order,
             "number": board["card_seq"],
             "title": title.strip() or "Untitled",
-            "description": fields.get("description", ""),
-            "labels": list(fields.get("labels", [])),
+            "description": description,
+            "labels": self._clean_labels(board, fields.get("labels", [])),
             "assignees": list(fields.get("assignees", [])),
             "due": fields.get("due"),
             "due_complete": fields.get("due_complete", False),
@@ -391,6 +487,8 @@ class HakanbanData:
         """Multi-line paste: one card per non-empty title, preserving order."""
         board = self._require_board(board_id)
         self._column(board, column_id)
+        if len(titles) > MAX_PASTE_LINES:
+            raise HakanbanError(f"Too many lines to paste at once (max {MAX_PASTE_LINES})")
         created: list[dict[str, Any]] = []
         for raw in titles:
             title = raw.strip()
@@ -398,7 +496,7 @@ class HakanbanData:
                 continue
             card = self._new_card(board, column_id, title)
             created.append(card)
-            self.hass.bus.async_fire(
+            self._fire(
                 EVENT_CARD_CREATED,
                 {"board_id": board_id, "column_id": column_id, "card_id": card["id"], "title": card["title"]},
             )
@@ -410,11 +508,22 @@ class HakanbanData:
     def update_card(self, card_id: str, **fields: Any) -> dict[str, Any]:
         card = self._require_card(card_id)
         was_completed = card.get("status") == STATUS_COMPLETED
+        if fields.get("title") is not None:
+            _check_len("Card title", fields["title"], MAX_TITLE_LEN)
+        if fields.get("description") is not None:
+            _check_len("Description", fields["description"], MAX_TEXT_LEN)
+        if fields.get("labels") is not None:
+            fields["labels"] = self._clean_labels(
+                self._require_board(card["board_id"]), fields["labels"]
+            )
         for key in (
             "title", "description", "labels", "assignees", "due",
             "due_complete", "status", "cover", "archived",
         ):
-            if key in fields and fields[key] is not None:
+            # ``None`` means "leave alone" for most fields, but it is the only way to
+            # clear a due date or cover (the "Clear" button, ``todo.update_item`` with
+            # no due date, ``hakanban.update_card due: null``).
+            if key in fields and (fields[key] is not None or key in _CLEARABLE):
                 card[key] = fields[key]
         card["updated"] = _now()
 
@@ -460,7 +569,7 @@ class HakanbanData:
             card.setdefault("comments", []).append(
                 {
                     "id": _uid(),
-                    "author": user or "Home Assistant",
+                    "author": user or self._actor.get("user") or "Home Assistant",
                     "ts": _now(),
                     "text": f"Moved from {from_label} to {to_label}",
                     "move_from": from_label,
@@ -468,10 +577,17 @@ class HakanbanData:
                 }
             )
 
+        if from_board_id != board_id:
+            # Number the card on its new board (numbers are per-board, so keeping the
+            # old one can collide) and drop labels that only exist on the old board.
+            board["card_seq"] = board.get("card_seq", 0) + 1
+            card["number"] = board["card_seq"]
+            card["labels"] = self._clean_labels(board, card.get("labels", []))
+
         card["board_id"] = board_id
         card["column_id"] = to_column
 
-        siblings = [c for c in self.cards_in_column(to_column) if c["id"] != card_id]
+        siblings =[c for c in self.cards_in_column(to_column) if c["id"] != card_id]
         if position is None or position >= len(siblings):
             position = len(siblings)
         position = max(0, position)
@@ -505,7 +621,11 @@ class HakanbanData:
     @_undoable
     def create_label(self, board_id: str, name: str, color: str) -> dict[str, Any]:
         board = self._require_board(board_id)
-        label = {"id": _uid(), "name": name or "", "color": color}
+        name = _check_len("Label name", name, MAX_LABEL_NAME_LEN)
+        color = _check_color(color)
+        if len(board.get("label_defs", [])) >= MAX_LABELS_PER_BOARD:
+            raise HakanbanError(f"A board can have at most {MAX_LABELS_PER_BOARD} labels")
+        label = {"id": _uid(), "name": name, "color": color}
         board.setdefault("label_defs", []).append(label)
         self._commit(board_id, EVENT_BOARD_CHANGED, {"board_id": board_id, "action": "label_created"})
         return label
@@ -515,6 +635,10 @@ class HakanbanData:
         board = self._require_board(board_id)
         for label in board.get("label_defs", []):
             if label["id"] == label_id:
+                if changes.get("name") is not None:
+                    _check_len("Label name", changes["name"], MAX_LABEL_NAME_LEN)
+                if changes.get("color") is not None:
+                    _check_color(changes["color"])
                 for key in ("name", "color"):
                     if key in changes and changes[key] is not None:
                         label[key] = changes[key]
@@ -535,7 +659,9 @@ class HakanbanData:
     @_undoable
     def add_comment(self, card_id: str, text: str, author: str | None = None) -> dict[str, Any]:
         card = self._require_card(card_id)
-        comment = {"id": _uid(), "author": author or "Home Assistant", "ts": _now(), "text": text}
+        text = _check_len("Comment", text, MAX_TEXT_LEN)
+        author = author or self._actor.get("user") or "Home Assistant"
+        comment = {"id": _uid(), "author": author, "ts": _now(), "text": text}
         card.setdefault("comments", []).append(comment)
         card["updated"] = _now()
         self._commit(
@@ -548,6 +674,7 @@ class HakanbanData:
     @_undoable
     def add_checklist(self, card_id: str, title: str) -> dict[str, Any]:
         card = self._require_card(card_id)
+        title = _check_len("Checklist title", title, MAX_TITLE_LEN)
         checklist = {"id": _uid(), "title": title or "Checklist", "items": []}
         card.setdefault("checklists", []).append(checklist)
         self._commit(card["board_id"])
@@ -558,7 +685,7 @@ class HakanbanData:
         card = self._require_card(card_id)
         for checklist in card.get("checklists", []):
             if checklist["id"] == checklist_id:
-                item = {"id": _uid(), "text": text, "done": False}
+                item = {"id": _uid(), "text": _check_len("Item", text, MAX_TITLE_LEN), "done": False}
                 checklist["items"].append(item)
                 self._commit(card["board_id"])
                 return item

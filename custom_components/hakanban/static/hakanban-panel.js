@@ -3,7 +3,7 @@
 
 import { STYLES } from "./styles.js";
 import { HakanbanApi } from "./api.js";
-import { escapeHtml, contrastText, debounce } from "./util.js";
+import { escapeHtml, labelStyle, debounce } from "./util.js";
 import { loadDisplayOpts } from "./display-opts.js";
 import { openOptionsDialog } from "./dialogs.js";
 import "./board-view.js";
@@ -209,7 +209,7 @@ export class HakanbanPanel extends HTMLElement {
     const chips = (board.labels || [])
       .map(
         (l) =>
-          `<span class="hk-label-chip ${this._activeLabels.has(l.id) ? "selected" : ""}" data-flabel="${l.id}" style="background:${l.color};color:${contrastText(l.color)}">${escapeHtml(l.name || "·")}</span>`
+          `<span class="hk-label-chip ${this._activeLabels.has(l.id) ? "selected" : ""}" data-flabel="${l.id}" style="${labelStyle(l.color)}">${escapeHtml(l.name || "·")}</span>`
       )
       .join("");
     bar.innerHTML = `<div class="hk-row" style="padding:8px 16px;border-bottom:1px solid var(--hk-divider)"><strong style="margin-right:6px">Labels:</strong>${chips || "<em>No labels yet</em>"} <button class="hk-btn secondary" data-clearf>Clear</button></div>`;

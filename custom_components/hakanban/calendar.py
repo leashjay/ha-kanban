@@ -108,9 +108,13 @@ class HakanbanCalendarEntity(CalendarEntity):
             uid=card["id"],
         )
 
-    def _events(self) -> list[CalendarEvent]:
+    def _events(self, include_done: bool = True) -> list[CalendarEvent]:
         events: list[CalendarEvent] = []
         for card in self._manager.cards_in_board(self._board_id):
+            if not include_done and (
+                card.get("status") == "completed" or card.get("due_complete")
+            ):
+                continue
             event = self._card_event(card)
             if event is not None:
                 events.append(event)
@@ -119,10 +123,14 @@ class HakanbanCalendarEntity(CalendarEntity):
     # ----------------------------------------------------------------- state
     @property
     def event(self) -> CalendarEvent | None:
-        """The current or next upcoming dated card (drives the entity state)."""
+        """The current or next upcoming dated card (drives the entity state).
+
+        Finished cards stay visible in the calendar view but never count here, so a
+        chore that is done doesn't keep the entity "on" or fire event-start triggers.
+        """
         now = dt_util.now()
         upcoming: CalendarEvent | None = None
-        for event in self._events():
+        for event in self._events(include_done=False):
             if _as_datetime(event.end) < now:
                 continue
             if upcoming is None or _as_datetime(event.start) < _as_datetime(upcoming.start):

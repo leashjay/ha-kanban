@@ -6,7 +6,7 @@ import {
   escapeHtml,
   renderMarkdown,
   formatDue,
-  contrastText,
+  labelStyle,
 } from "./util.js";
 
 const PALETTE = ["#61bd4f", "#f2d600", "#ff9f1a", "#eb5a46", "#c377e0", "#0079bf", "#00c2e0", "#51e898", "#ff78cb", "#344563"];
@@ -28,10 +28,80 @@ export class HakanbanCardDetail extends HTMLElement {
 
   // Called by the parent when fresh board data arrives.
   update(card, board) {
+    // Every change anyone makes anywhere pushes a fresh payload and re-renders the
+    // modal from scratch. Carry over what the user is in the middle of typing (and
+    // where they are on the page) so a stranger's edit doesn't wipe it.
+    const draft = this._captureDraft();
     this._card = card;
     this._board = board;
-    if (card) this.render();
+    if (card) this.render(draft);
     else this._close();
+  }
+
+  _captureDraft() {
+    const root = this.shadowRoot;
+    if (!root.firstElementChild) return null;
+    const q = (sel) => root.querySelector(sel);
+    const active = root.activeElement;
+    const draft = {
+      desc: q("#hk-desc")?.value,
+      comment: q("#hk-comment")?.value,
+      labelName: q("#hk-label-name")?.value,
+      newLabelOpen: q("#hk-new-label")?.style.display === "flex",
+      // The title is saved on blur, so it only counts as a draft while it has focus.
+      title: active?.classList?.contains("hk-title-edit") ? active.value : undefined,
+      checks: {},
+      scroll: q(".hk-modal-back")?.scrollTop || 0,
+      focus: null,
+    };
+    root.querySelectorAll(".hk-add-check").forEach((i) => (draft.checks[i.dataset.cl] = i.value));
+    if (active) {
+      draft.focus = {
+        id: active.id || null,
+        cls: active.className || "",
+        cl: active.dataset?.cl || null,
+        start: active.selectionStart,
+        end: active.selectionEnd,
+      };
+    }
+    return draft;
+  }
+
+  _restoreDraft(d) {
+    const root = this.shadowRoot;
+    const q = (sel) => root.querySelector(sel);
+    const put = (sel, value) => {
+      const el = q(sel);
+      if (el && value) el.value = value;
+    };
+    put("#hk-desc", d.desc);
+    put("#hk-comment", d.comment);
+    put("#hk-label-name", d.labelName);
+    if (d.title !== undefined) put(".hk-title-edit", d.title);
+    for (const [cl, value] of Object.entries(d.checks)) {
+      const el = [...root.querySelectorAll(".hk-add-check")].find((i) => i.dataset.cl === cl);
+      if (el && value) el.value = value;
+    }
+    if (d.newLabelOpen) {
+      const row = q("#hk-new-label");
+      if (row) row.style.display = "flex";
+    }
+    const back = q(".hk-modal-back");
+    if (back) back.scrollTop = d.scroll;
+
+    const f = d.focus;
+    if (!f) return;
+    let el = null;
+    if (f.id) el = [...root.querySelectorAll("[id]")].find((n) => n.id === f.id);
+    else if (f.cl) el = [...root.querySelectorAll(".hk-add-check")].find((i) => i.dataset.cl === f.cl);
+    else if (String(f.cls).includes("hk-title-edit")) el = q(".hk-title-edit");
+    if (!el) return;
+    el.focus();
+    try {
+      if (f.start != null) el.setSelectionRange(f.start, f.end);
+    } catch {
+      /* not a text field (e.g. the datetime input) */
+    }
   }
 
   _close() {
@@ -39,7 +109,7 @@ export class HakanbanCardDetail extends HTMLElement {
     this.remove();
   }
 
-  render() {
+  render(draft = null) {
     const c = this._card;
     const b = this._board;
     if (!c) return;
@@ -48,9 +118,8 @@ export class HakanbanCardDetail extends HTMLElement {
 
     const labelsHtml = (b.labels || [])
       .map((l) => {
-        const text = contrastText(l.color);
         const sel = selected.has(l.id) ? "selected" : "";
-        return `<span class="hk-label-chip ${sel}" data-label="${l.id}" style="background:${l.color};color:${text}">${escapeHtml(l.name || "·")}</span>`;
+        return `<span class="hk-label-chip ${sel}" data-label="${l.id}" style="${labelStyle(l.color)}">${escapeHtml(l.name || "·")}</span>`;
       })
       .join("");
 
@@ -140,6 +209,7 @@ export class HakanbanCardDetail extends HTMLElement {
       </div>`;
 
     this._wire();
+    if (draft) this._restoreDraft(draft);
   }
 
   _wire() {

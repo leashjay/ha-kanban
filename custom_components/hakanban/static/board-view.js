@@ -4,7 +4,7 @@
 
 import { STYLES } from "./styles.js";
 import { HakanbanCardDetail } from "./card-detail.js";
-import { escapeHtml } from "./util.js";
+import { escapeHtml, safeBackground } from "./util.js";
 import { normalizeDisplayOpts } from "./display-opts.js";
 import { cardHtml } from "./card-render.js";
 import { wireDnD } from "./dnd.js";
@@ -94,7 +94,8 @@ export class HakanbanBoard extends HTMLElement {
            <button class="hk-btn secondary" data-addcol-cancel>✕</button></div></div></div>`
       : `<div class="hk-add-col"><button data-addcol-open>+ Add a list</button></div>`;
 
-    const bg = b.background ? `style="background:${escapeHtml(b.background)}"` : "";
+    const safeBg = safeBackground(b.background);
+    const bg = safeBg ? `style="background:${safeBg}"` : "";
     const compactCls = this._displayOpts.compact ? "compact" : "";
     this.shadowRoot.innerHTML = `<style>${STYLES}</style>
       <div class="hk-board ${compactCls}" data-board ${bg}>${cols}${addCol}</div>`;

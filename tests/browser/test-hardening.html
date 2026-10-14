@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Hakanban hardening tests</title>
+    <style>
+      body { background: #1d2125; color: #e6edf3; font-family: monospace; padding: 20px; }
+      .pass { color: #61bd4f; }
+      .fail { color: #eb5a46; }
+    </style>
+  </head>
+  <body>
+    <h1>Hardening tests</h1>
+    <div id="results"></div>
+    <div id="host" style="position:absolute;left:-9999px;top:0;width:900px;height:700px"></div>
+
+    <!--
+      Run:  python3 -m http.server 8000   then open
+      http://localhost:8000/tests/browser/test-hardening.html
+      Covers: hostile colours/backgrounds can't inject markup, the open card modal keeps what
+      the user is typing across live updates, dashboard cards re-subscribe when re-attached,
+      and only the full sidebar panel handles Ctrl+Z.
+    -->
+    <script type="module">
+      import "/tests/browser/mock-hass.js";
+      import "/custom_components/hakanban/static/hakanban-panel.js";
+
+      const results = [];
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      function check(name, cond) {
+        results.push({ name, cond: !!cond });
+        const el = document.createElement("div");
+        el.className = cond ? "pass" : "fail";
+        el.textContent = (cond ? "PASS" : "FAIL") + " - " + name;
+        document.getElementById("results").appendChild(el);
+      }
+
+      // Every element in the document, descending into shadow roots.
+      function* deepEls(root) {
+        for (const el of root.querySelectorAll("*")) {
+          yield el;
+          if (el.shadowRoot) yield* deepEls(el.shadowRoot);
+        }
+      }
+      const eventHandlerAttrs = () => {
+        const found = [];
+        for (const el of deepEls(document)) {
+          for (const a of el.attributes) if (a.name.startsWith("on")) found.push(`${el.tagName}[${a.name}]`);
+        }
+        return found;
+      };
+
+      const hass = window.__mockHass;
+      const send = (type, extra = {}) => hass.connection.sendMessagePromise({ type: `hakanban/${type}`, ...extra });
+
+      // Count live subscriptions and advertise undo so the Ctrl+Z handler has work to do.
+      let active = 0;
+      const origSubscribe = hass.connection.subscribeMessage.bind(hass.connection);
+      hass.connection.subscribeMessage = (cb, msg) => {
+        active++;
+        let released = false;
+        return origSubscribe((payload) => cb({ ...payload, can_undo: true }), msg).then((unsub) => () => {
+          if (!released) { released = true; active--; }
+          unsub();
+        });
+      };
+
+      const host = document.getElementById("host");
+      const card = document.createElement("div");
+      host.appendChild(card);
+      const embedded = document.createElement("hakanban-panel");
+      embedded.embedded = true; // how <hakanban-card> mounts it on a dashboard
+      card.appendChild(embedded);
+      embedded.hass = hass;
+      await sleep(250);
+
+      const boardEl = embedded._boardEl;
+      check("board rendered", !!boardEl?.board);
+      const cardId = boardEl.board.columns[0].cards[0].id;
+
+      // ---------------------------------------------------- hostile colours/backgrounds
+      const EVIL = 'red" onmouseover="window.__xss=1" data-x="';
+      const evilLabel = await send("create_label", { board_id: "b1", name: "evil", color: EVIL });
+      await send("update_card", { card_id: cardId, labels: [evilLabel.id] });
+      await send("update_board", { board_id: "b1", background: 'red" onload="window.__xss=2" x="' });
+      await sleep(150);
+      embedded._showFilter = true;
+      embedded._renderFilterbar();
+      boardEl._openCard(cardId);
+      await sleep(100);
+
+      check("no inline event handlers anywhere after hostile label/background", eventHandlerAttrs().length === 0);
+      // Only look inside the components' shadow trees (this page's own <script> is light DOM).
+      const shadowEls = [];
+      for (const el of deepEls(document)) if (el.getRootNode() instanceof ShadowRoot) shadowEls.push(el);
+      check("no injected script/img/iframe elements in the UI",
+        shadowEls.length > 0 && !shadowEls.some((e) => ["SCRIPT", "IMG", "IFRAME"].includes(e.tagName)));
+      const faceChip = [...deepEls(boardEl.shadowRoot)].find((e) => e.classList?.contains("hk-label") && e.textContent === "evil");
+      check("card-face label falls back to a neutral colour", faceChip?.getAttribute("style")?.startsWith("background:#838c91"));
+      const modal = document.querySelector("hakanban-card-detail");
+      const modalChip = [...modal.shadowRoot.querySelectorAll(".hk-label-chip")].find((e) => e.textContent === "evil");
+      check("modal label chip falls back to a neutral colour", modalChip?.getAttribute("style")?.startsWith("background:#838c91"));
+      const filterChip = [...embedded.shadowRoot.querySelectorAll(".hk-label-chip")].find((e) => e.textContent === "evil");
+      check("filter chip falls back to a neutral colour", filterChip?.getAttribute("style")?.startsWith("background:#838c91"));
+      const boardDiv = boardEl.shadowRoot.querySelector("[data-board]");
+      check("hostile background is dropped", !boardDiv.hasAttribute("onload") && !(boardDiv.getAttribute("style") || "").includes("red"));
+      await send("update_board", { board_id: "b1", background: "#0079bf" });
+      await sleep(100);
+      check("a valid background still applies",
+        (boardEl.shadowRoot.querySelector("[data-board]").getAttribute("style") || "").includes("#0079bf"));
+      check("window.__xss was never set", window.__xss === undefined);
+
+      // ---------------------------------------------- open modal keeps in-progress input
+      const q = (sel) => modal.shadowRoot.querySelector(sel);
+      const comment = q("#hk-comment");
+      comment.value = "half-written comment";
+      comment.focus();
+      comment.setSelectionRange(2, 5);
+      await send("create_card", { board_id: "b1", column_id: "c2", title: "Someone else's card" });
+      await sleep(100);
+      check("comment draft survives another user's change", q("#hk-comment")?.value === "half-written comment");
+      check("focus stays in the comment box", modal.shadowRoot.activeElement?.id === "hk-comment");
+      check("caret/selection is kept", q("#hk-comment")?.selectionStart === 2 && q("#hk-comment")?.selectionEnd === 5);
+
+      modal._editingDesc = true;
+      modal.render();
+      q("#hk-desc").value = "unsaved description edits";
+      await send("create_card", { board_id: "b1", column_id: "c3", title: "Another card" });
+      await sleep(100);
+      check("description edit survives a live update", q("#hk-desc")?.value === "unsaved description edits");
+      check("still in description edit mode", !!q("#hk-desc"));
+
+      modal._editingDesc = false;
+      modal._close();
+      await sleep(20);
+
+      // ------------------------------------------------ re-subscribe when re-attached
+      const before = active;
+      card.removeChild(embedded);
+      await sleep(60);
+      check("unsubscribes when detached", active === before - 1);
+      card.appendChild(embedded);
+      await sleep(150);
+      check("re-subscribes when re-attached", active === before);
+      await send("create_card", { board_id: "b1", column_id: "c1", title: "Added after reattach" });
+      await sleep(120);
+      const titles = [...embedded._boardEl.shadowRoot.querySelectorAll(".hk-card-title")].map((e) => e.textContent);
+      check("board live-updates after re-attach", titles.includes("Added after reattach"));
+
+      // ------------------------------------------------------------ Ctrl+Z scoping
+      const undoCount = () => window.__hkLog.filter((c) => c === "undo").length;
+      const ctrlZ = () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", ctrlKey: true, bubbles: true }));
+      const u0 = undoCount();
+      ctrlZ();
+      await sleep(40);
+      check("embedded (dashboard) panel ignores Ctrl+Z", undoCount() === u0);
+
+      const second = document.createElement("hakanban-panel");
+      second.embedded = true;
+      card.appendChild(second);
+      second.hass = hass;
+      await sleep(150);
+      ctrlZ();
+      await sleep(40);
+      check("two dashboard cards still don't undo", undoCount() === u0);
+
+      const sidebar = document.createElement("hakanban-panel"); // the full-page panel
+      host.appendChild(sidebar);
+      sidebar.hass = hass;
+      await sleep(150);
+      ctrlZ();
+      await sleep(40);
+      check("sidebar panel handles Ctrl+Z exactly once", undoCount() === u0 + 1);
+
+      // ----------------------------------------------------------------- summary
+      const passed = results.filter((r) => r.cond).length;
+      const total = results.length;
+      const el = document.createElement("div");
+      el.style.fontSize = "1.2em";
+      el.style.marginTop = "16px";
+      el.className = passed === total ? "pass" : "fail";
+      el.textContent = `${passed}/${total} checks passed`;
+      document.getElementById("results").appendChild(el);
+      window.__testResults = results;
+      window.__testDone = true;
+    </script>
+  </body>
+</html>

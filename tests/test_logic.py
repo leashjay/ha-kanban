@@ -261,6 +261,80 @@ def run():
     check("undo on empty history returns False", mgr.undo() is False)
     check("redo refills from a drained undo", mgr.can_redo is True)
 
+    # ------------------------------------------------- hardening (fork additions)
+    def raises(fn, *a, **k):
+        try:
+            fn(*a, **k)
+        except data.HakanbanError:
+            return True
+        return False
+
+    hb = mgr.create_board("Hardening", seed=True)
+    hid, hcol, hcol2 = hb["id"], hb["columns"][0]["id"], hb["columns"][1]["id"]
+
+    # Label colours / backgrounds end up in inline styles: only hex (or a gradient).
+    ok_label = mgr.create_label(hid, "ok", "#61bd4f")
+    check("hex label colour accepted", ok_label["color"] == "#61bd4f")
+    for bad in ('red" onmouseover="alert(1)', "red", "#12", "#zzzzzz", "url(http://x)",
+                "#61bd4f;background:url(x)", "#61bd4f\n", ""):
+        check(f"label colour rejected: {bad!r}", raises(mgr.create_label, hid, "x", bad))
+    check("label update validates colour", raises(mgr.update_label, hid, ok_label["id"], color='"><img>'))
+    check("failed label update leaves colour alone", ok_label["color"] == "#61bd4f")
+    check("background hex accepted", mgr.update_board(hid, background="#0079bf")["background"] == "#0079bf")
+    check("background gradient accepted", mgr.update_board(
+        hid, background="linear-gradient(135deg,#667eea,#764ba2)")["background"] is not None)
+    check("background empty clears", mgr.update_board(hid, background="")["background"] is None)
+    check("background url() rejected", raises(mgr.update_board, hid, background="url(http://x/y)"))
+    check("background with quote rejected", raises(mgr.create_board, "t", '#fff" onload="x'))
+
+    # Values stored before validation existed are repaired on load, not rendered.
+    mgr.boards[hid]["background"] = 'red" onmouseover="x'
+    mgr.boards[hid]["label_defs"][0]["color"] = '"><script>'
+    mgr._sanitize_loaded()
+    check("load resets a bad background", mgr.boards[hid]["background"] is None)
+    check("load resets a bad label colour", mgr.boards[hid]["label_defs"][0]["color"] == "#838c91")
+
+    # Clearing a due date works (None used to be ignored).
+    dcard = mgr.create_card(hid, hcol, "due", due="2026-10-20T09:00:00")
+    mgr.update_card(dcard["id"], due=None)
+    check("update_card(due=None) clears the due date", mgr.cards[dcard["id"]]["due"] is None)
+    mgr.update_card(dcard["id"], title=None)
+    check("update_card(title=None) still leaves the title", mgr.cards[dcard["id"]]["title"] == "due")
+
+    # Who did it: comments and events carry the acting user.
+    with mgr.acting_as("uid-1", "Sam"):
+        cm = mgr.add_comment(dcard["id"], "hello")
+        mgr.move_card(dcard["id"], hcol2)
+    check("comment author is the acting user", cm["author"] == "Sam")
+    check("move auto-comment is attributed", mgr.cards[dcard["id"]]["comments"][-1]["author"] == "Sam")
+    mv = [e for e in hass.bus.events if e[0] == "hakanban_card_moved" and e[1].get("card_id") == dcard["id"]]
+    check("move event carries user_id/user", mv and mv[-1][1].get("user_id") == "uid-1" and mv[-1][1].get("user") == "Sam")
+    check("no actor outside the block", mgr.add_comment(dcard["id"], "x")["author"] == "Home Assistant")
+
+    # Input limits.
+    check("overlong card title rejected", raises(mgr.create_card, hid, hcol, "x" * 501))
+    check("overlong description rejected", raises(mgr.create_card, hid, hcol, "t", description="x" * 20001))
+    check("overlong comment rejected", raises(mgr.add_comment, dcard["id"], "x" * 20001))
+    check("too many pasted lines rejected", raises(mgr.create_cards_bulk, hid, hcol, ["a"] * 201))
+
+    # A failed call must not leave a half-applied change or a stray undo entry.
+    before_cards = len(mgr.cards)
+    depth = len(mgr._undo_stack)
+    raises(mgr.create_cards_bulk, hid, hcol, ["ok"] * 5 + ["x" * 501])
+    check("failed bulk paste creates nothing", len(mgr.cards) == before_cards)
+    check("failed bulk paste leaves undo history alone", len(mgr._undo_stack) == depth)
+
+    # Labels on cards must exist on the board; cross-board moves renumber and drop foreign labels.
+    mine = mgr.create_label(hid, "mine", "#c377e0")
+    lc = mgr.create_card(hid, hcol, "labelled", labels=[mine["id"], "green", "bogus"])
+    check("unknown label ids are dropped on create", lc["labels"] == [mine["id"], "green"])
+    other = mgr.create_board("Other board", seed=True)
+    oid, ocol = other["id"], other["columns"][0]["id"]
+    existing = mgr.create_card(oid, ocol, "already here")
+    moved_card = mgr.move_card(lc["id"], ocol, to_board=oid)
+    check("cross-board move renumbers on the new board", moved_card["number"] == existing["number"] + 1)
+    check("cross-board move drops labels the new board lacks", moved_card["labels"] == ["green"])
+
     failed = [n for n, ok in RESULTS if not ok]
     print()
     print(f"{len(RESULTS) - len(failed)}/{len(RESULTS)} checks passed")
