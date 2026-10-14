@@ -41,11 +41,21 @@ export class HakanbanPanel extends HTMLElement {
     if (this._hass && !this._api) {
       this._api = new HakanbanApi(this._hass);
       this._start();
+    } else if (this._api && this._built) {
+      // Lovelace detaches and re-attaches cards on view/tab switches, and
+      // disconnectedCallback() tore the subscription down. Restore it so the
+      // board keeps live-updating without a page reload.
+      this._setupKeyboard();
+      this._subscribe();
     }
   }
 
   disconnectedCallback() {
-    if (this._unsub) this._unsub.then((u) => u && u()).catch(() => {});
+    if (this._unsub) {
+      const unsub = this._unsub;
+      this._unsub = null;
+      unsub.then((u) => u && u()).catch(() => {});
+    }
     if (this._onKeydown) {
       window.removeEventListener("keydown", this._onKeydown);
       this._onKeydown = null;
@@ -53,9 +63,11 @@ export class HakanbanPanel extends HTMLElement {
   }
 
   // Ctrl/⌘+Z = undo, Ctrl/⌘+Shift+Z or Ctrl+Y = redo. Skipped while typing in a
-  // field so the browser's native text undo keeps working.
+  // field so the browser's native text undo keeps working. Only the full-page
+  // sidebar panel listens: undo is store-wide, so a dashboard card (or several
+  // of them) must not turn Ctrl+Z anywhere on the dashboard into a board undo.
   _setupKeyboard() {
-    if (this._onKeydown) return;
+    if (this._onKeydown || this.embedded) return;
     this._onKeydown = (e) => {
       if (!(e.ctrlKey || e.metaKey)) return;
       const key = (e.key || "").toLowerCase();
@@ -76,6 +88,11 @@ export class HakanbanPanel extends HTMLElement {
   async _start() {
     this._build();
     this._setupKeyboard();
+    this._subscribe();
+  }
+
+  _subscribe() {
+    if (!this._api || this._unsub) return;
     this._unsub = this._api.subscribe((payload) => {
       this._data = payload;
       // Resolve the initial board: explicit config > localStorage > first board.
