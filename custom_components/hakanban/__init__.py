@@ -8,6 +8,7 @@ from homeassistant.core import HomeAssistant
 
 from .const import DATA_MANAGER, DOMAIN
 from .data import HakanbanData
+from .options import panel_settings
 from .frontend import async_register_frontend, async_unregister_panel
 from .services import async_setup_services, async_unload_services
 from .store import HakanbanStore
@@ -30,7 +31,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # hakanban.* services for automations / scripts / Assist.
     await async_setup_services(hass)
     # Static assets + sidebar panel + auto-loaded Lovelace card.
-    await async_register_frontend(hass)
+    title, icon = panel_settings(entry.options)
+    await async_register_frontend(hass, title, icon)
 
     # Each column becomes a todo entity grouped under its board device.
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

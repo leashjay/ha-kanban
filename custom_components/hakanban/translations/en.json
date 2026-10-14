@@ -10,6 +10,22 @@
       "single_instance_allowed": "Hakanban is already set up."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Name and icon",
+        "description": "How Hakanban appears in the sidebar and above the board. Leave a field blank to use the default.",
+        "data": {
+          "panel_title": "Name",
+          "panel_icon": "Icon (for example mdi:hammer-wrench)"
+        }
+      }
+    },
+    "error": {
+      "title_too_long": "The name can be at most 40 characters.",
+      "invalid_icon": "Use an icon name like mdi:hammer-wrench."
+    }
+  },
   "services": {
     "add_card": { "name": "Add card", "description": "Add a card to a Hakanban column." },
     "move_card": { "name": "Move card", "description": "Move a card to another column." },

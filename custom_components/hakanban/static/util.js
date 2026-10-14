@@ -58,18 +58,33 @@ export function safeCssLength(value, fallback) {
   return /^\d+(?:\.\d+)?(?:px|em|rem|vh|vw|%)$/.test(v) ? v : fallback;
 }
 
-// Colours and backgrounds are written into inline ``style`` attributes, so only values of
-// the exact shapes the backend accepts are allowed through; anything else (including data
-// stored before the backend validated it) falls back to a neutral value.
-const HEX_COLOR = /^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
-const GRADIENT = /^linear-gradient\(\d{1,3}deg,\s*#[0-9a-fA-F]{3,8},\s*#[0-9a-fA-F]{3,8}\)$/;
+// Colours and backgrounds are written into inline ``style`` attributes, so only values of the
+// exact shapes the server accepts are allowed through. The server sends those shapes with
+// every payload (``validation``; defined once in const.py) and ``configureValidation``
+// installs them. Until then nothing is trusted: colours fall back to a neutral grey.
+let COLOR_RE = null;
+let GRADIENT_RE = null;
+
+const compile = (source) => {
+  try {
+    return typeof source === "string" && source ? new RegExp(`^(?:${source})$`) : null;
+  } catch {
+    return null;
+  }
+};
+
+export function configureValidation(validation) {
+  COLOR_RE = compile(validation?.color);
+  GRADIENT_RE = compile(validation?.gradient);
+}
 
 export function safeColor(value, fallback = "#838c91") {
-  return typeof value === "string" && HEX_COLOR.test(value) ? value : fallback;
+  return COLOR_RE && typeof value === "string" && COLOR_RE.test(value) ? value : fallback;
 }
 
 export function safeBackground(value) {
-  return typeof value === "string" && (HEX_COLOR.test(value) || GRADIENT.test(value)) ? value : "";
+  if (typeof value !== "string") return "";
+  return (COLOR_RE && COLOR_RE.test(value)) || (GRADIENT_RE && GRADIENT_RE.test(value)) ? value : "";
 }
 
 // Inline style for a label chip: a safe background plus a readable text colour.

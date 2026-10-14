@@ -126,8 +126,8 @@ history is capped at `UNDO_HISTORY_LIMIT` (50) states and reset to empty on load
 
 | event | data |
 |-------|------|
-| `hakanban_card_created` | `board_id`, `column_id`, `card_id`, `title` |
-| `hakanban_card_updated` | `board_id`, `card_id`, `column_id?`, `action?` |
+| `hakanban_card_created` | `board_id`, `column_id`, `card_id`, `title`, `assigned?` |
+| `hakanban_card_updated` | `board_id`, `card_id`, `column_id?`, `action?`, `assigned?`, `unassigned?` |
 | `hakanban_card_moved` | `board_id`, `card_id`, `from_column`, `to_column` |
 | `hakanban_card_completed` | `board_id`, `card_id`, `column_id` |
 | `hakanban_card_deleted` | `board_id`, `card_id` |
@@ -151,3 +151,16 @@ each column entity (Assist / voice).
   (summary `#<number> <title>`); a date-only due is an all-day event, a due with a time is a
   one-hour block. Read-only view over `HakanbanData`, so dated cards appear in HA's Calendar
   panel / dashboard card and are Assist-queryable and automatable.
+
+## Assignees
+
+`assignees` on a card is a list of Home Assistant **person entity ids** (`person.<name>`), without
+repeats, at most 20. Anything else is rejected (`invalid_request` over the websocket,
+`ServiceValidationError` from a service), and values that are not person ids are dropped when the
+store is loaded. Ids are stored, not names, so a rename in Home Assistant doesn't break an assignment;
+the frontend looks up each person's name and picture from `hass.states`. An id whose person no longer
+exists is shown as a dimmed "?" avatar and can still be removed from the card.
+
+When an update changes who a card is assigned to, the `hakanban_card_updated` (or `_completed`) event
+carries `assigned` (ids newly added) and/or `unassigned` (ids removed). A card created with assignees
+carries `assigned` on `hakanban_card_created`. These fields are absent when nothing changed.

@@ -3,8 +3,9 @@
 
 import { STYLES } from "./styles.js";
 import { HakanbanApi } from "./api.js";
-import { escapeHtml, labelStyle, debounce } from "./util.js";
+import { escapeHtml, labelStyle, debounce, configureValidation } from "./util.js";
 import { loadDisplayOpts } from "./display-opts.js";
+import { listPeople, myPersonId, personChipHtml, UNASSIGNED } from "./people.js";
 import { openOptionsDialog } from "./dialogs.js";
 import "./board-view.js";
 
@@ -15,12 +16,29 @@ export class HakanbanPanel extends HTMLElement {
     this._activeBoardId = localStorage.getItem("hakanban_active_board") || null;
     this._query = "";
     this._activeLabels = new Set();
+    this._activePeople = new Set();
     this._showFilter = false;
     this._built = false;
     this._displayOpts = loadDisplayOpts();
     // Surface server-side rejections through Home Assistant's own toast.
     this._notify = (message) =>
       this.dispatchEvent(new CustomEvent("hass-notification", { detail: { message }, bubbles: true, composed: true }));
+  }
+
+  // Home Assistant hands the panel its registration (``panel.config.title`` is the name chosen in
+  // the integration's options).
+  set panel(value) {
+    this._panelInfo = value;
+    this._toolbarKey = null;
+    if (this._data) this._renderToolbar();
+  }
+
+  // The name shown at the left of the toolbar. A card embedded in a dashboard already has
+  // its own heading, so it shows none.
+  _brandHtml() {
+    if (this.embedded) return "";
+    const title = this._panelInfo?.config?.title;
+    return `📋 ${escapeHtml(typeof title === "string" && title.trim() ? title : "Hakanban")}`;
   }
 
   // Optional: lock the initial board (used by the Lovelace card config).
@@ -102,6 +120,7 @@ export class HakanbanPanel extends HTMLElement {
       const key = JSON.stringify(payload);
       if (key === this._lastPayload) return;
       this._lastPayload = key;
+      configureValidation(payload.validation);
       this._data = payload;
       // Resolve the initial board: explicit config > localStorage > first board.
       if (this._initialBoardWant) {
@@ -121,6 +140,7 @@ export class HakanbanPanel extends HTMLElement {
         this._activeBoardId,
         payload.can_undo,
         payload.can_redo,
+        this._panelInfo?.config?.title,
       ]);
       if (toolbarKey !== this._toolbarKey) {
         this._toolbarKey = toolbarKey;
@@ -163,14 +183,14 @@ export class HakanbanPanel extends HTMLElement {
     const canRedo = !!this._data?.can_redo;
     const tb = this.shadowRoot.getElementById("toolbar");
     tb.innerHTML = `
-      <span class="hk-title">📋 Hakanban</span>
+      <span class="hk-title">${this._brandHtml()}</span>
       <div class="hk-board-tabs">${tabs}
         <button class="hk-iconbtn" id="add-board" title="New board">+</button>
       </div>
       <button class="hk-iconbtn" id="undo-btn" title="Undo (Ctrl/⌘+Z)" ${canUndo ? "" : "disabled"}>↶</button>
       <button class="hk-iconbtn" id="redo-btn" title="Redo (Ctrl/⌘+Shift+Z)" ${canRedo ? "" : "disabled"}>↷</button>
       <input class="hk-search" id="search" type="search" placeholder="Search cards…" value="${escapeHtml(this._query)}">
-      <button class="hk-iconbtn" id="filter-btn" title="Filter by label">⚑</button>
+      <button class="hk-iconbtn" id="filter-btn" title="Filter by label or person">⚑</button>
       <button class="hk-iconbtn" id="del-board" title="Delete board">🗑</button>
       <button class="hk-iconbtn" id="opts-btn" title="Board options">⚙</button>`;
 
@@ -231,7 +251,16 @@ export class HakanbanPanel extends HTMLElement {
           `<span class="hk-label-chip ${this._activeLabels.has(l.id) ? "selected" : ""}" data-flabel="${escapeHtml(l.id)}" style="${labelStyle(l.color)}">${escapeHtml(l.name || "·")}</span>`
       )
       .join("");
-    bar.innerHTML = `<div class="hk-row" style="padding:8px 16px;border-bottom:1px solid var(--hk-divider)"><strong style="margin-right:6px">Labels:</strong>${chips || "<em>No labels yet</em>"} <button class="hk-btn secondary" data-clearf>Clear</button></div>`;
+    const people = listPeople(this._hass);
+    const me = myPersonId(people, this._hass);
+    const peopleChips = people
+      .map((p) => personChipHtml(p, { selected: this._activePeople.has(p.id), dataAttr: "data-fperson", suffix: p.id === me ? " (me)" : "" }))
+      .join("");
+    const unassigned = `<span class="hk-person-chip${this._activePeople.has(UNASSIGNED) ? " selected" : ""}" data-fperson="${UNASSIGNED}"><span>Unassigned</span></span>`;
+    const rowStyle = "padding:8px 16px;border-bottom:1px solid var(--hk-divider)";
+    bar.innerHTML =
+      `<div class="hk-row" style="${rowStyle}"><strong style="margin-right:6px">Labels:</strong>${chips || "<em>No labels yet</em>"} <button class="hk-btn secondary" data-clearf>Clear</button></div>` +
+      (people.length ? `<div class="hk-row" style="${rowStyle}"><strong style="margin-right:6px">People:</strong>${peopleChips}${unassigned}</div>` : "");
 
     bar.querySelectorAll("[data-flabel]").forEach((el) =>
       el.addEventListener("click", () => {
@@ -241,12 +270,25 @@ export class HakanbanPanel extends HTMLElement {
         this._applyFilter();
       })
     );
+    bar.querySelectorAll("[data-fperson]").forEach((el) =>
+      el.addEventListener("click", () => {
+        const id = el.dataset.fperson;
+        this._activePeople.has(id) ? this._activePeople.delete(id) : this._activePeople.add(id);
+        this._renderFilterbar();
+        this._applyFilter();
+      })
+    );
     const clearf = bar.querySelector("[data-clearf]");
-    if (clearf) clearf.addEventListener("click", () => { this._activeLabels.clear(); this._renderFilterbar(); this._applyFilter(); });
+    if (clearf) clearf.addEventListener("click", () => {
+      this._activeLabels.clear();
+      this._activePeople.clear();
+      this._renderFilterbar();
+      this._applyFilter();
+    });
   }
 
   _applyFilter() {
-    if (this._boardEl) this._boardEl.filter = { query: this._query, labels: this._activeLabels };
+    if (this._boardEl) this._boardEl.filter = { query: this._query, labels: this._activeLabels, people: this._activePeople };
   }
 
   _renderBoard() {
@@ -256,7 +298,7 @@ export class HakanbanPanel extends HTMLElement {
       this._boardEl.board = null;
       return;
     }
-    this._boardEl.filter = { query: this._query, labels: this._activeLabels };
+    this._boardEl.filter = { query: this._query, labels: this._activeLabels, people: this._activePeople };
     this._boardEl.board = board;
   }
 }

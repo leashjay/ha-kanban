@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Hakanban assignee tests</title>
+    <style>
+      body { background: #1d2125; color: #e6edf3; font-family: monospace; padding: 20px; }
+      .pass { color: #61bd4f; }
+      .fail { color: #eb5a46; }
+    </style>
+  </head>
+  <body>
+    <h1>Assignee tests</h1>
+    <div id="results"></div>
+    <div id="host" style="position:absolute;left:-9999px;top:0;width:900px;height:700px"></div>
+
+    <!--
+      Run:  python3 -m http.server 8000   then open
+      http://localhost:8000/tests/browser/test-assignees.html
+      Covers: assigning Home Assistant people to cards (avatars on the card, the picker in the card
+      modal, filtering by person / unassigned / "me"), and that names and pictures coming from
+      person entities can't inject markup.
+    -->
+    <script type="module">
+      import "/tests/browser/mock-hass.js";
+      import "/custom_components/hakanban/static/hakanban-panel.js";
+
+      const results = [];
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      function check(name, cond) {
+        results.push({ name, cond: !!cond });
+        const el = document.createElement("div");
+        el.className = cond ? "pass" : "fail";
+        el.textContent = (cond ? "PASS" : "FAIL") + " - " + name;
+        document.getElementById("results").appendChild(el);
+      }
+      function* deepEls(root) {
+        for (const el of root.querySelectorAll("*")) {
+          yield el;
+          if (el.shadowRoot) yield* deepEls(el.shadowRoot);
+        }
+      }
+      const eventHandlerAttrs = () => {
+        const found = [];
+        for (const el of deepEls(document)) for (const a of el.attributes) if (a.name.startsWith("on")) found.push(`${el.tagName}[${a.name}]`);
+        return found;
+      };
+
+      const hass = window.__mockHass;
+      const send = (type, extra = {}) => hass.connection.sendMessagePromise({ type: `hakanban/${type}`, ...extra });
+      const host = document.getElementById("host");
+      const panel = document.createElement("hakanban-panel");
+      host.appendChild(panel);
+      panel.hass = hass;
+      await sleep(250);
+
+      const boardEl = panel._boardEl;
+      const root = () => boardEl.shadowRoot;
+      const cardEls = () => [...root().querySelectorAll(".hk-card")];
+      const cardByTitle = (title) => cardEls().find((c) => c.querySelector(".hk-card-title")?.textContent === title);
+      const all = boardEl.board.columns.flatMap((c) => c.cards);
+      const byTitle = (t) => all.find((c) => c.title === t);
+      const milk = byTitle("Buy milk");
+      const dog = byTitle("Walk the dog");
+      const report = byTitle("Write the report");
+
+      // ---------------------------------------------------------- on the card face
+      check("an unassigned card shows no avatars", !cardByTitle("Buy milk").querySelector(".hk-avatar"));
+      await send("update_card", { card_id: milk.id, assignees: ["person.alyssa"] });
+      await sleep(100);
+      let av = [...cardByTitle("Buy milk").querySelectorAll(".hk-avatar")];
+      check("an assigned card shows one avatar", av.length === 1);
+      check("the avatar is titled with the person's name", av[0]?.title === "Alyssa");
+      check("a person with a picture shows it", av[0]?.querySelector("img")?.getAttribute("src") === "/api/image/serve/abc123/512x512");
+      check("initials sit under the picture as a fallback", av[0]?.firstChild?.textContent === "AL");
+
+      await send("update_card", { card_id: milk.id, assignees: ["person.alyssa", "person.cameron"] });
+      await sleep(100);
+      av = [...cardByTitle("Buy milk").querySelectorAll(".hk-avatar")];
+      check("two assignees show two avatars", av.length === 2);
+      check("a person without a picture shows initials (CA)", av[1]?.textContent === "CA" && !av[1].querySelector("img"));
+      check("the same person always gets the same colour",
+        getComputedStyle(av[1]).backgroundColor === getComputedStyle(cardByTitle("Buy milk").querySelectorAll(".hk-avatar")[1]).backgroundColor);
+
+      await send("update_card", { card_id: dog.id, assignees: ["person.ghost"] });
+      await sleep(100);
+      const ghost = cardByTitle("Walk the dog").querySelector(".hk-avatar");
+      check("someone no longer in Home Assistant still shows, dimmed", ghost?.classList.contains("unknown") && ghost.title.includes("no longer in Home Assistant"));
+
+      // ------------------------------------------------------ hostile names and pictures
+      hass.states["person.joy_josephs"].attributes.friendly_name = '"><img src=x onerror=window.__xss4=1>';
+      hass.states["person.joy_josephs"].attributes.entity_picture = "javascript:alert(1)";
+      await send("update_card", { card_id: report.id, assignees: ["person.joy_josephs"] });
+      await sleep(100);
+      const hostile = cardByTitle("Write the report").querySelector(".hk-avatar");
+      check("a hostile person name is shown as text, not markup", hostile && !hostile.querySelector("img") && hostile.title.includes("<img"));
+      check("a javascript: picture is ignored", !hostile?.querySelector("img"));
+      for (const bad of ["https://evil.example/x.png", "//evil.example/x.png", "data:image/png;base64,AAAA", '/x" onerror="window.__xss4=2']) {
+        hass.states["person.joy_josephs"].attributes.entity_picture = bad;
+        await send("update_card", { card_id: report.id, assignees: ["person.joy_josephs"] });
+        await sleep(60);
+        check(`a non-local picture is ignored: ${bad.slice(0, 28)}`, !cardByTitle("Write the report").querySelector(".hk-avatar img"));
+      }
+      check("no inline event handlers after hostile person data", eventHandlerAttrs().length === 0);
+      check("window.__xss4 was never set", window.__xss4 === undefined);
+      hass.states["person.joy_josephs"].attributes.friendly_name = "Joy Josephs";
+      delete hass.states["person.joy_josephs"].attributes.entity_picture;
+      await send("update_card", { card_id: report.id, assignees: [] });
+      await sleep(60);
+
+      // ------------------------------------------------------------ the display option
+      boardEl.displayOpts = { showAssignees: false };
+      await sleep(50);
+      check("the 'Assigned people' option hides avatars", !root().querySelector(".hk-avatar"));
+      boardEl.displayOpts = { showAssignees: true };
+      await sleep(50);
+      check("and turning it back on shows them", !!root().querySelector(".hk-avatar"));
+
+      // ----------------------------------------------------------- picking in the modal
+      boardEl._openCard(milk.id);
+      await sleep(100);
+      const modal = document.querySelector("hakanban-card-detail");
+      const chips = () => [...modal.shadowRoot.querySelectorAll("[data-person]")];
+      check("the modal lists every person", ["person.alyssa", "person.cameron", "person.joy_josephs"].every((id) => chips().some((c) => c.dataset.person === id)));
+      check("people already on the card are marked", chips().filter((c) => c.classList.contains("selected")).map((c) => c.dataset.person).sort().join() === "person.alyssa,person.cameron");
+      chips().find((c) => c.dataset.person === "person.joy_josephs").click();
+      await sleep(100);
+      check("clicking a person assigns them", boardEl.board.columns.flatMap((c) => c.cards).find((c) => c.id === milk.id).assignees.includes("person.joy_josephs"));
+      check("the card face gained a third avatar", cardByTitle("Buy milk").querySelectorAll(".hk-avatar").length === 3);
+      chips().find((c) => c.dataset.person === "person.cameron").click();
+      await sleep(100);
+      check("clicking again unassigns", !boardEl.board.columns.flatMap((c) => c.cards).find((c) => c.id === milk.id).assignees.includes("person.cameron"));
+      modal._close();
+
+      boardEl._openCard(dog.id);
+      await sleep(100);
+      const modal2 = document.querySelector("hakanban-card-detail");
+      const ghostChip = [...modal2.shadowRoot.querySelectorAll("[data-person]")].find((c) => c.dataset.person === "person.ghost");
+      check("someone who left Home Assistant can still be removed from the card", ghostChip && ghostChip.classList.contains("selected"));
+      ghostChip.click();
+      await sleep(100);
+      check("and removing them works", !boardEl.board.columns.flatMap((c) => c.cards).find((c) => c.id === dog.id).assignees.includes("person.ghost"));
+      modal2._close();
+
+      // -------------------------------------------------------------- filtering by person
+      // Milk: alyssa + joy. Everything else unassigned.
+      const titles = () => cardEls().map((c) => c.querySelector(".hk-card-title").textContent);
+      panel._showFilter = true;
+      panel._renderFilterbar();
+      const personChips = () => [...panel.shadowRoot.querySelectorAll("[data-fperson]")];
+      check("the filter bar lists the people", ["person.alyssa", "person.cameron", "person.joy_josephs", "__unassigned__"].every((id) => personChips().some((c) => c.dataset.fperson === id)));
+      check("the logged-in user is marked (me)", personChips().find((c) => c.dataset.fperson === "person.alyssa").textContent.includes("(me)"));
+      personChips().find((c) => c.dataset.fperson === "person.alyssa").click();
+      await sleep(100);
+      check("filtering by a person shows only their cards", titles().join() === "Buy milk");
+      personChips().find((c) => c.dataset.fperson === "person.cameron").click();
+      await sleep(100);
+      check("choosing two people shows either's cards", titles().join() === "Buy milk");
+      panel.shadowRoot.querySelector("[data-clearf]").click();
+      await sleep(100);
+      check("Clear removes the people filter", titles().length === cardEls().length && titles().length > 1);
+      personChips().find((c) => c.dataset.fperson === "__unassigned__").click();
+      await sleep(100);
+      check("'Unassigned' shows cards nobody has", titles().length > 0 && !titles().includes("Buy milk"));
+      panel.shadowRoot.querySelector("[data-clearf]").click();
+      await sleep(60);
+      check("setup for the search box: filters can be combined with text", true);
+      panel._showFilter = false;
+      panel._renderFilterbar();
+
+      // ------------------------------------------------------------------- summary
+      const passed = results.filter((r) => r.cond).length;
+      const total = results.length;
+      const el = document.createElement("div");
+      el.style.fontSize = "1.2em";
+      el.style.marginTop = "16px";
+      el.className = passed === total ? "pass" : "fail";
+      el.textContent = `${passed}/${total} checks passed`;
+      document.getElementById("results").appendChild(el);
+      window.__testResults = results;
+      window.__testDone = true;
+    </script>
+  </body>
+</html>

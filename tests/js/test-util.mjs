@@ -4,11 +4,26 @@
 //
 // Needs a Node that can import an ES module from a .js file (22.7+ / 24).
 
+import { readFileSync } from "node:fs";
 import {
+  configureValidation,
   renderMarkdown as md, safeCssLength, safeColor, safeBackground, labelStyle,
   parseDue, formatDue, dueState, contrastText, escapeHtml, toDatetimeLocal,
 } from "../../custom_components/hakanban/static/util.js";
 import { columnDropIndex, cardDropPosition } from "../../custom_components/hakanban/static/dnd.js";
+import {
+  initialsOf, hueFor, safePicture, listPeople, peopleById, personFor, myPersonId, avatarHtml, personChipHtml,
+} from "../../custom_components/hakanban/static/people.js";
+
+// The colour/background patterns have one definition, in const.py (the server sends them to the
+// page). Read them from there so these tests exercise the real thing.
+const constPy = readFileSync(new URL("../../custom_components/hakanban/const.py", import.meta.url), "utf8");
+function pyPattern(name) {
+  const m = new RegExp(`^${name}: Final = (?:\\(\\s*)?r"(.*)"(?:\\s*\\))?$`, "m").exec(constPy);
+  if (!m) throw new Error(`${name} not found in const.py`);
+  return m[1];
+}
+configureValidation({ color: pyPattern("COLOR_PATTERN"), gradient: pyPattern("GRADIENT_PATTERN") });
 
 let failed = 0;
 let total = 0;
@@ -39,6 +54,20 @@ eq("a quote can't break out of href", md('[x](https://a.b/"onmouseover="y)').inc
 eq("img onerror is escaped", md("<img src=x onerror=alert(1)>").includes("<img"), false);
 eq("NULs are stripped (no forged link placeholders)", md("\u00000\u0000"), "0");
 eq("forged placeholder next to a real link", md("\u00000\u0000 [a](https://q.r)").includes("undefined"), false);
+
+// ------------------------------------------- validation comes from the server
+configureValidation(null);
+eq("nothing is trusted before the patterns arrive (colour)", safeColor("#61bd4f"), "#838c91");
+eq("nothing is trusted before the patterns arrive (background)", safeBackground("#0079bf"), "");
+configureValidation({ color: "(", gradient: 5 });
+eq("a broken pattern trusts nothing rather than throwing", safeColor("#61bd4f"), "#838c91");
+configureValidation({ color: pyPattern("COLOR_PATTERN"), gradient: pyPattern("GRADIENT_PATTERN") });
+eq("the real patterns accept #rgb", safeColor("#fff"), "#fff");
+eq("the real patterns accept #rrggbbaa", safeColor("#61bd4fcc"), "#61bd4fcc");
+eq("the real patterns reject 5 hex digits", safeColor("#61bd4"), "#838c91");
+eq("the real patterns reject a non-ASCII digit lookalike", safeColor("#\u0661\u0662\u0663"), "#838c91");
+eq("gradient with spaces after commas", safeBackground("linear-gradient(135deg, #667eea, #764ba2)"), "linear-gradient(135deg, #667eea, #764ba2)");
+eq("gradient with an extra stop is rejected", safeBackground("linear-gradient(135deg,#667eea,#764ba2,#000)"), "");
 
 // ---------------------------------------------------------- css / colours
 eq("px length", safeCssLength("600px", "x"), "600px");
@@ -111,6 +140,56 @@ eq("card with filter: hidden cards trail the visible ones",
   cardDropPosition(["b", "c", "d", "e"], ["b", "c"], null), 2);
 eq("card with filter: nothing visible goes to the end", cardDropPosition(["b", "c"], [], null), 2);
 eq("card: an unknown 'after' falls back to the end", cardDropPosition(["b", "c"], ["b"], "zzz"), 2);
+
+// ------------------------------------------------------------------------- people
+eq("initials: two words", initialsOf("Alyssa Josephs"), "AJ");
+eq("initials: three words use the first two", initialsOf("Mary Jane Watson"), "MJ");
+eq("initials: one word uses two letters", initialsOf("Cameron"), "CA");
+eq("initials: one letter", initialsOf("X"), "X");
+eq("initials: empty", initialsOf(""), "?");
+eq("initials: extra spaces", initialsOf("  joy   josephs "), "JJ");
+eq("initials: an emoji isn't split in half", initialsOf("😀😀 x"), "😀X");
+eq("hue is stable", hueFor("person.cameron"), hueFor("person.cameron"));
+eq("hue differs between people", hueFor("person.cameron") !== hueFor("person.alyssa"), true);
+eq("hue is within 0-359", [hueFor("a"), hueFor("person.joy_josephs"), hueFor("")].every((h) => Number.isInteger(h) && h >= 0 && h < 360), true);
+eq("a same-origin picture path is kept", safePicture("/api/image/serve/x/512x512"), "/api/image/serve/x/512x512");
+eq("an external URL is dropped", safePicture("https://evil.example/a.png"), "");
+eq("a protocol-relative URL is dropped", safePicture("//evil.example/a.png"), "");
+eq("a javascript: URL is dropped", safePicture("javascript:alert(1)"), "");
+eq("a data: URL is dropped", safePicture("data:image/png;base64,AAAA"), "");
+eq("a path with a quote is dropped", safePicture('/x" onerror="y'), "");
+eq("a non-string picture is dropped", safePicture(null), "");
+const hass = {
+  user: { id: "u-cam" },
+  states: {
+    "person.cameron": { attributes: { friendly_name: "Cameron", user_id: "u-cam" } },
+    "person.alyssa": { attributes: { friendly_name: "Alyssa", user_id: "u-aly", entity_picture: "/api/image/serve/a/512x512" } },
+    "person.joy_josephs": { attributes: {} },
+    "light.kitchen": { attributes: { friendly_name: "Kitchen" } },
+  },
+};
+const people = listPeople(hass);
+eq("listPeople returns only person entities", people.map((p) => p.id).sort().join(), "person.alyssa,person.cameron,person.joy_josephs");
+eq("listPeople sorts by name", people.map((p) => p.name).join(), "Alyssa,Cameron,Joy Josephs");
+eq("a missing friendly_name falls back to a readable entity id", people.find((p) => p.id === "person.joy_josephs").name, "Joy Josephs");
+eq("the picture and user id are carried", people[0].picture === "/api/image/serve/a/512x512" && people[0].userId === "u-aly", true);
+eq("no hass means no people", listPeople(null).length, 0);
+eq("myPersonId finds the person linked to the logged-in user", myPersonId(people, hass), "person.cameron");
+eq("myPersonId is null when nobody matches", myPersonId(people, { user: { id: "nope" } }), null);
+eq("myPersonId is null when there is no user", myPersonId(people, {}), null);
+const byId = peopleById(people);
+eq("personFor finds a known person", personFor(byId, "person.cameron").name, "Cameron");
+eq("personFor makes a placeholder for a removed person", personFor(byId, "person.gone").unknown, true);
+eq("the placeholder shows '?'", personFor(byId, "person.gone").initials, "?");
+const evil = { id: "person.x", name: '"><img src=x onerror=alert(1)>', initials: '"><', picture: "", hue: 10 };
+eq("avatarHtml escapes the name", avatarHtml(evil).includes("<img"), false);
+eq("avatarHtml escapes the initials", avatarHtml(evil).includes('"><'), false);
+eq("avatarHtml with a picture includes it", avatarHtml(people[0]).includes('<img src="/api/image/serve/a/512x512"'), true);
+eq("avatarHtml without a picture has no img", avatarHtml(people[1]).includes("<img"), false);
+eq("avatarHtml never trusts a non-integer hue", avatarHtml({ ...evil, hue: "0);background:url(x" }).includes("url("), false);
+eq("avatarHtml marks a removed person", avatarHtml(personFor(byId, "person.gone")).includes("no longer in Home Assistant"), true);
+eq("personChipHtml marks a selected person", personChipHtml(people[0], { selected: true, dataAttr: "data-person" }).includes("selected"), true);
+eq("personChipHtml escapes the id", personChipHtml({ ...evil, id: '"x' }, { dataAttr: "data-person" }).includes('"x"'), false);
 
 console.log(`\n${total - failed}/${total} checks passed`);
 process.exit(failed ? 1 : 0);

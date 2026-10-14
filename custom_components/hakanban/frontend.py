@@ -39,7 +39,9 @@ async def _async_card_url(hass: HomeAssistant) -> str:
     return f"{CARD_URL}?v={version}" if version else CARD_URL
 
 
-async def async_register_frontend(hass: HomeAssistant) -> None:
+async def async_register_frontend(
+    hass: HomeAssistant, title: str = PANEL_TITLE, icon: str = PANEL_ICON
+) -> None:
     """Register static paths, the Lovelace card resource, and the sidebar panel."""
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     card_url = await _async_card_url(hass)
@@ -76,8 +78,10 @@ async def async_register_frontend(hass: HomeAssistant) -> None:
         frontend_url_path=PANEL_URL_PATH,
         webcomponent_name="hakanban-panel",
         module_url=f"{STATIC_URL_BASE}/{PANEL_JS_FILENAME}",
-        sidebar_title=PANEL_TITLE,
-        sidebar_icon=PANEL_ICON,
+        sidebar_title=title,
+        sidebar_icon=icon,
+        # Reaches the panel element as ``panel.config`` (used for the header above the board).
+        config={"title": title},
         require_admin=False,
         embed_iframe=False,
         trust_external=False,

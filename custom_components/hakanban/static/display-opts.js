@@ -11,6 +11,7 @@ export const DISPLAY_OPTS = [
   { key: "showDescription", label: "Description", default: true },
   { key: "showChecklists", label: "Checklists", default: true },
   { key: "showLabels", label: "Tags", default: true },
+  { key: "showAssignees", label: "Assigned people", default: true },
   { key: "showCardNumber", label: "Card number", default: true },
   { key: "showDueDate", label: "Due date", default: true },
   { key: "showComments", label: "Comments", default: true, children: [

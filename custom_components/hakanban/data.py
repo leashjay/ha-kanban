@@ -27,6 +27,8 @@ from homeassistant.util import dt as dt_util
 from homeassistant.util import uuid as uuid_util
 
 from .const import (
+    ASSIGNEE_PATTERN,
+    COLOR_PATTERN,
     DEFAULT_LABELS,
     EVENT_BOARD_CHANGED,
     EVENT_CARD_COMPLETED,
@@ -34,6 +36,7 @@ from .const import (
     EVENT_CARD_DELETED,
     EVENT_CARD_MOVED,
     EVENT_CARD_UPDATED,
+    GRADIENT_PATTERN,
     MAX_ASSIGNEES,
     MAX_ASSIGNEE_LEN,
     MAX_BOARDS,
@@ -68,10 +71,9 @@ def _now() -> str:
 
 # Colours and backgrounds end up inside a ``style="..."`` attribute in the frontend, so
 # only accept shapes that can't carry markup or extra CSS (no quotes, ``url()``, ``;``).
-_HEX_COLOR = re.compile(r"#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})")
-_GRADIENT = re.compile(
-    r"linear-gradient\(\d{1,3}deg,\s*#[0-9a-fA-F]{3,8},\s*#[0-9a-fA-F]{3,8}\)"
-)
+_ASSIGNEE = re.compile(ASSIGNEE_PATTERN)
+_HEX_COLOR = re.compile(COLOR_PATTERN)
+_GRADIENT = re.compile(GRADIENT_PATTERN)
 
 
 def _check_color(value: str) -> str:
@@ -122,11 +124,17 @@ def _check_due(value: str | None) -> str | None:
 
 
 def _check_assignees(value: list[str]) -> list[str]:
+    """Home Assistant person entity ids, without repeats, in the order given."""
     if len(value) > MAX_ASSIGNEES:
         raise HakanbanError(f"A card can have at most {MAX_ASSIGNEES} assignees")
+    checked: list[str] = []
     for who in value:
         _check_len("Assignee", who, MAX_ASSIGNEE_LEN)
-    return list(value)
+        if not isinstance(who, str) or not _ASSIGNEE.fullmatch(who):
+            raise HakanbanError("Assignees must be Home Assistant people, e.g. person.alyssa")
+        if who not in checked:
+            checked.append(who)
+    return checked
 
 
 # Card fields that may be set back to ``None`` through ``update_card``.
@@ -223,6 +231,10 @@ class HakanbanData:
                 card["due"] = _check_due(card.get("due"))
             except HakanbanError:
                 card["due"] = None
+            card["assignees"] = [
+                who for who in card.get("assignees", [])
+                if isinstance(who, str) and _ASSIGNEE.fullmatch(who)
+            ]
         for board in self._data["boards"].values():
             try:
                 board["background"] = _check_background(board.get("background"))
@@ -412,6 +424,8 @@ class HakanbanData:
             ],
             "can_undo": self.can_undo,
             "can_redo": self.can_redo,
+            # The frontend validates colours with exactly these, so there is one definition.
+            "validation": {"color": COLOR_PATTERN, "gradient": GRADIENT_PATTERN},
         }
         self._payload_cache = (self._version, payload)
         return payload
@@ -573,10 +587,12 @@ class HakanbanData:
         board = self._require_board(board_id)
         self._column(board, column_id)  # validate
         card = self._new_card(board, column_id, title, **fields)
-        self._commit(
-            board_id, EVENT_CARD_CREATED,
-            {"board_id": board_id, "column_id": column_id, "card_id": card["id"], "title": card["title"]},
-        )
+        event_data = {
+            "board_id": board_id, "column_id": column_id, "card_id": card["id"], "title": card["title"],
+        }
+        if card["assignees"]:
+            event_data["assigned"] = list(card["assignees"])
+        self._commit(board_id, EVENT_CARD_CREATED, event_data)
         return card
 
     @_undoable
@@ -606,6 +622,7 @@ class HakanbanData:
     def update_card(self, card_id: str, **fields: Any) -> dict[str, Any]:
         card = self._require_card(card_id)
         was_completed = card.get("status") == STATUS_COMPLETED
+        old_assignees = list(card.get("assignees", []))
         if fields.get("title") is not None:
             fields["title"] = _check_len("Card title", fields["title"], MAX_TITLE_LEN).strip() or "Untitled"
         # "Done" is one fact with two inputs (the board's tick box sets ``due_complete``,
@@ -644,10 +661,17 @@ class HakanbanData:
             event = EVENT_CARD_COMPLETED
         elif not now_completed and was_completed:
             card.pop("completed", None)
-        self._commit(
-            card["board_id"], event,
-            {"board_id": card["board_id"], "column_id": card["column_id"], "card_id": card_id},
-        )
+        event_data: dict[str, Any] = {
+            "board_id": card["board_id"], "column_id": card["column_id"], "card_id": card_id,
+        }
+        # Lets an automation tell people they were given (or taken off) a card.
+        assigned = [who for who in card["assignees"] if who not in old_assignees]
+        unassigned = [who for who in old_assignees if who not in card["assignees"]]
+        if assigned:
+            event_data["assigned"] = assigned
+        if unassigned:
+            event_data["unassigned"] = unassigned
+        self._commit(card["board_id"], event, event_data)
         return card
 
     @_undoable

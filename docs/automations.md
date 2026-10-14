@@ -219,6 +219,43 @@ trigger follow-up automations.
 
 ---
 
+## 7. Tell people when they're given a card
+
+Assigning (or unassigning) a card puts the people involved on the event: `assigned` and
+`unassigned` hold `person.*` entity ids. This notifies each newly assigned person. Replace
+`notify.notify` with the notify service you use for that person (for example
+`notify.mobile_app_<phone>`); a `choose` per person lets each get their own phone.
+
+```yaml
+alias: Hakanban - tell people when they get a card
+mode: queued
+triggers:
+  - trigger: event
+    event_type: hakanban_card_updated
+  - trigger: event
+    event_type: hakanban_card_created
+conditions:
+  - condition: template
+    value_template: "{{ trigger.event.data.assigned is defined }}"
+actions:
+  - repeat:
+      for_each: "{{ trigger.event.data.assigned }}"
+      sequence:
+        - action: notify.notify
+          data:
+            title: "New job for {{ state_attr(repeat.item, 'friendly_name') }}"
+            message: "You've been given a card on the board."
+```
+
+Who made the change is on the event too (`user`, `user_id`), so you can skip the notification when
+someone assigns a card to themselves:
+`{{ trigger.event.data.user_id != state_attr(repeat.item, 'user_id') }}`.
+
+`hakanban.add_card` and `hakanban.update_card` accept `assignees` (a list of `person.*` ids; an empty
+list unassigns everyone).
+
+---
+
 ## Notes
 
 - **Triggering on board structure changes:** `hakanban_board_changed` fires for board/column/

@@ -37,6 +37,10 @@ v1 ships the **Core + multi-line paste** scope:
 - **Drag and drop** — move cards within a column and between columns, and reorder columns by
   dragging their headers (native HTML5 drag-and-drop — no build step, no external library).
 - **Labels** — colour + name per board, with **filter-by-label**.
+- **Assigned people** *(this fork)* — assign a card to one or more Home Assistant **people**
+  (`person.*`). Their picture or initials show on the card, you can **filter by person**, by
+  **Unassigned**, and the logged-in user is marked **(me)**. Assigning fires an event (below), so an
+  automation can tell the person.
 - **Due dates** — with a due-complete checkbox. Cards with a due date also surface on the
   board's native HA **`calendar` entity**, so dated tasks appear in Home Assistant's Calendar
   panel and dashboard card.
@@ -90,6 +94,12 @@ Open the **Hakanban** panel from the sidebar:
 - **Bulk-create:** paste a multi-line block (e.g. a shopping list) into the card composer —
   each non-empty line becomes its own card, in order.
 - **Filter by label** and **search** to find cards quickly.
+
+### Name and icon
+
+Settings → Devices & services → Hakanban → **Configure** lets you rename the sidebar entry (and the
+header above the board) and change its icon, e.g. `Renovation` / `mdi:hammer-wrench`. The integration
+reloads to apply it.
 
 ### Embeddable Lovelace card
 
@@ -147,8 +157,8 @@ Every mutation fires a Home Assistant event you can trigger automations on:
 
 | Event | Data |
 |-------|------|
-| `hakanban_card_created` | `board_id`, `column_id`, `card_id`, `title` |
-| `hakanban_card_updated` | `board_id`, `card_id`, `column_id?`, `action?` |
+| `hakanban_card_created` | `board_id`, `column_id`, `card_id`, `title`, `assigned?` |
+| `hakanban_card_updated` | `board_id`, `card_id`, `column_id?`, `action?`, `assigned?`, `unassigned?` |
 | `hakanban_card_moved` | `board_id`, `card_id`, `from_column`, `to_column` |
 | `hakanban_card_completed` | `board_id`, `card_id`, `column_id` |
 | `hakanban_card_deleted` | `board_id`, `card_id` |

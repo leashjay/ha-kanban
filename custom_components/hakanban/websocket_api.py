@@ -211,6 +211,7 @@ def ws_move_column(hass, connection, msg, manager: HakanbanData):
         vol.Required("title"): str,
         vol.Optional("description"): str,
         vol.Optional("labels"): [str],
+        vol.Optional("assignees"): [str],
         vol.Optional("due"): vol.Any(str, None),
     }
 )
@@ -220,6 +221,7 @@ def ws_create_card(hass, connection, msg, manager: HakanbanData):
         msg["board_id"], msg["column_id"], msg["title"],
         description=msg.get("description", ""),
         labels=msg.get("labels", []),
+        assignees=msg.get("assignees", []),
         due=msg.get("due"),
     )
 
