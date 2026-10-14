@@ -6,8 +6,9 @@
 
 import {
   renderMarkdown as md, safeCssLength, safeColor, safeBackground, labelStyle,
-  parseDue, formatDue, dueState, contrastText, escapeHtml,
+  parseDue, formatDue, dueState, contrastText, escapeHtml, toDatetimeLocal,
 } from "../../custom_components/hakanban/static/util.js";
+import { columnDropIndex, cardDropPosition } from "../../custom_components/hakanban/static/dnd.js";
 
 let failed = 0;
 let total = 0;
@@ -69,6 +70,47 @@ if (process.env.TZ === "Pacific/Auckland") {
   eq("offset stamp shows NZ wall time (NZDT)", parseDue("2026-10-20T09:30:00+13:00").getHours(), 9);
   eq("date-only before the DST change is still local midnight", parseDue("2026-09-26").getHours(), 0);
 }
+
+// ------------------------------------------------- date-only due dates and local time
+const day = (offset) => {
+  const d = new Date();
+  d.setDate(d.getDate() + offset);
+  const p2 = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+};
+eq("a date-only due today is not overdue", dueState(day(0), false), "soon");
+eq("a date-only due yesterday is overdue", dueState(day(-1), false), "overdue");
+eq("a date-only due tomorrow is not overdue", dueState(day(1), false) !== "overdue", true);
+eq("a date-only due far ahead is neither", dueState(day(30), false), "");
+eq("a completed card is 'done' whatever its date", dueState(day(-5), true), "done");
+eq("toDatetimeLocal: naive datetime unchanged", toDatetimeLocal("2026-10-20T09:30:00"), "2026-10-20T09:30");
+eq("toDatetimeLocal: date-only has no time", toDatetimeLocal("2026-10-20"), "");
+eq("toDatetimeLocal: garbage is empty", toDatetimeLocal("2026-10-20Tnope"), "");
+if (process.env.TZ === "Pacific/Auckland") {
+  eq("toDatetimeLocal: +13:00 stamp shows NZ wall time", toDatetimeLocal("2026-10-20T09:30:00+13:00"), "2026-10-20T09:30");
+  eq("toDatetimeLocal: a UTC stamp converts to NZ time", toDatetimeLocal("2026-10-20T09:30:00Z"), "2026-10-20T22:30");
+}
+
+// ------------------------------------------------------------ drag and drop positions
+// Columns [A, B, C] have midpoints 100/300/500. Dragging A removes it from the list the
+// server sees, so the "others" are [B, C] with midpoints 300/500.
+eq("column: drop left of everything", columnDropIndex([300, 500], 50), 0);
+eq("column: drag A to between B and C", columnDropIndex([300, 500], 400), 1);
+eq("column: drag A to the far right", columnDropIndex([300, 500], 900), 2);
+eq("column: no other columns", columnDropIndex([], 10), 0);
+// Cards in a column: [a, b, c, d]; dragging 'a' leaves [b, c, d].
+eq("card: before b", cardDropPosition(["b", "c", "d"], ["b", "c", "d"], "b"), 0);
+eq("card: before d", cardDropPosition(["b", "c", "d"], ["b", "c", "d"], "d"), 2);
+eq("card: at the end", cardDropPosition(["b", "c", "d"], ["b", "c", "d"], null), 3);
+eq("card: empty column", cardDropPosition([], [], null), 0);
+// A filter hides b and c (full list [b,c,d,e], visible [d,e]); dropping before d must land
+// after the hidden cards, before d.
+eq("card with filter: before the first visible card", cardDropPosition(["b", "c", "d", "e"], ["d", "e"], "d"), 2);
+eq("card with filter: after the last visible card", cardDropPosition(["b", "c", "d", "e"], ["d", "e"], null), 4);
+eq("card with filter: hidden cards trail the visible ones",
+  cardDropPosition(["b", "c", "d", "e"], ["b", "c"], null), 2);
+eq("card with filter: nothing visible goes to the end", cardDropPosition(["b", "c"], [], null), 2);
+eq("card: an unknown 'after' falls back to the end", cardDropPosition(["b", "c"], ["b"], "zzz"), 2);
 
 console.log(`\n${total - failed}/${total} checks passed`);
 process.exit(failed ? 1 : 0);

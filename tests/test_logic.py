@@ -417,6 +417,83 @@ def run():
     mgr._sanitize_loaded()
     check("load resets a bad stored due date", mgr.cards[vc["id"]]["due"] is None)
 
+    # ------------------------------------------------ review fixes (round 2)
+    rb = mgr.create_board("Review fixes", seed=True)
+    rid, rcol = rb["id"], rb["columns"][0]["id"]
+
+    # A call that changes nothing leaves no undo entry (and keeps what could be redone).
+    depth = len(mgr._undo_stack)
+    mgr.create_cards_bulk(rid, rcol, ["", "   "])
+    check("pasting only blank lines adds no undo entry", len(mgr._undo_stack) == depth)
+    mgr.create_card(rid, rcol, "undo me")
+    mgr.undo()
+    check("setup: something to redo", mgr.can_redo is True)
+    mgr.create_cards_bulk(rid, rcol, [""])
+    check("a no-op doesn't clear the redo stack", mgr.can_redo is True)
+    while mgr.can_redo:
+        mgr.redo()
+
+    # A paste that fails part-way announces nothing.
+    n_events = len(hass.bus.events)
+    raises(mgr.create_cards_bulk, rid, rcol, ["ok1", "ok2", "x" * 501])
+    check("a failed paste fires no card_created events",
+          not [e for e in hass.bus.events[n_events:] if e[0] == "hakanban_card_created"])
+    mgr.create_cards_bulk(rid, rcol, ["p1", "p2"])
+    check("a good paste fires one event per card",
+          len([e for e in hass.bus.events[n_events:] if e[0] == "hakanban_card_created"]) == 2)
+
+    # "Done" has two inputs (tick box and to-do status); each keeps the other in step.
+    dc = mgr.create_card(rid, rcol, "done?")
+    mgr.update_card(dc["id"], due_complete=True)
+    check("ticking the box completes the card", mgr.cards[dc["id"]]["status"] == "completed")
+    mgr.update_card(dc["id"], status="needs_action")
+    check("reopening the card clears the tick", mgr.cards[dc["id"]]["due_complete"] is False)
+    mgr.update_card(dc["id"], status="completed")
+    check("completing the card ticks the box", mgr.cards[dc["id"]]["due_complete"] is True)
+    mgr.update_card(dc["id"], due=None)
+    check("clearing the due date doesn't reopen a done card", mgr.cards[dc["id"]]["status"] == "completed")
+    check("a card created as completed is ticked",
+          mgr.create_card(rid, rcol, "born done", status="completed")["due_complete"] is True)
+
+    # Titles can't be blanked on update either.
+    mgr.update_card(dc["id"], title="   ")
+    check("a blank title becomes 'Untitled'", mgr.cards[dc["id"]]["title"] == "Untitled")
+
+    # Due validation: ASCII digits and sane offsets only.
+    for bad in ("2026-01-01T\u0661\u0660:00", "2026-01-01T10:00+99:99", "2026-01-01T10:00+05:75",
+                "\u0662\u0660\u0662\u0666-01-01"):
+        check(f"due rejected: {bad!r}", raises(mgr.create_card, rid, rcol, "d", due=bad))
+    check("a sensible offset is accepted", mgr.create_card(rid, rcol, "d", due="2026-01-01T10:00-05:00")["due"] is not None)
+
+    # Count limits.
+    const_mod = sys.modules["hkpkg.const"]
+    ob = mgr.create_card(rid, rcol, "limits")
+    for _ in range(const_mod.MAX_CHECKLISTS_PER_CARD):
+        mgr.add_checklist(ob["id"], "c")
+    check("too many checklists rejected", raises(mgr.add_checklist, ob["id"], "one more"))
+    cl = mgr.cards[ob["id"]]["checklists"][0]
+    for _ in range(const_mod.MAX_CHECK_ITEMS):
+        mgr.add_check_item(ob["id"], cl["id"], "i")
+    check("too many checklist items rejected", raises(mgr.add_check_item, ob["id"], cl["id"], "one more"))
+    for _ in range(const_mod.MAX_COMMENTS_PER_CARD):
+        mgr.add_comment(ob["id"], "c")
+    check("too many comments rejected", raises(mgr.add_comment, ob["id"], "one more"))
+    # ...but moving a card never fails: automatic move comments just trim the oldest.
+    other_col = rb["columns"][1]["id"]
+    mgr.move_card(ob["id"], other_col)
+    check("a move still works at the comment limit", mgr.cards[ob["id"]]["column_id"] == other_col)
+    check("the comment count stays at the limit", len(mgr.cards[ob["id"]]["comments"]) == const_mod.MAX_COMMENTS_PER_CARD)
+    check("the newest comment is the move", mgr.cards[ob["id"]]["comments"][-1]["text"].startswith("Moved from"))
+    for i in range(const_mod.MAX_COLUMNS_PER_BOARD - len(rb["columns"])):
+        mgr.create_column(rid, f"c{i}")
+    check("too many lists rejected", raises(mgr.create_column, rid, "one more"))
+    saved_boards = dict(mgr.boards)
+    while len(mgr.boards) < const_mod.MAX_BOARDS:
+        mgr.create_board(f"filler {len(mgr.boards)}")
+    check("too many boards rejected", raises(mgr.create_board, "one more"))
+    for bid_ in [b for b in mgr.boards if b not in saved_boards]:
+        mgr.delete_board(bid_)
+
     failed = [n for n, ok in RESULTS if not ok]
     print()
     print(f"{len(RESULTS) - len(failed)}/{len(RESULTS)} checks passed")

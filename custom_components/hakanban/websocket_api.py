@@ -18,8 +18,13 @@ from .const import DATA_MANAGER, DOMAIN, SIGNAL_BOARDS_UPDATED
 from .data import HakanbanData, HakanbanError
 
 
-def _manager(hass: HomeAssistant) -> HakanbanData:
-    return hass.data[DOMAIN][DATA_MANAGER]
+def _manager(hass: HomeAssistant) -> HakanbanData | None:
+    """The current manager, or ``None`` while the integration isn't loaded.
+
+    Always look it up at call time: reloading the integration replaces the manager, and
+    anything holding the old one (an open subscription, say) would serve frozen data.
+    """
+    return hass.data.get(DOMAIN, {}).get(DATA_MANAGER)
 
 
 def _guard(
@@ -31,6 +36,9 @@ def _guard(
     def wrapper(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> None:
         user = getattr(connection, "user", None)
         manager = _manager(hass)
+        if manager is None:
+            connection.send_error(msg["id"], "not_loaded", "Hakanban is not loaded")
+            return
         try:
             # Attribute the change to whoever sent it (comment author, event user).
             with manager.acting_as(getattr(user, "id", None), getattr(user, "name", None)):
@@ -56,10 +64,16 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/subscribe"})
 @callback
 def ws_subscribe(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> None:
-    manager = _manager(hass)
+    if _manager(hass) is None:
+        connection.send_error(msg["id"], "not_loaded", "Hakanban is not loaded")
+        return
 
     @callback
     def _forward(_board_id: str | None = None) -> None:
+        # Resolved on every push so a reload of the integration is picked up.
+        manager = _manager(hass)
+        if manager is None:
+            return
         connection.send_message(
             websocket_api.event_message(msg["id"], manager.full_payload())
         )

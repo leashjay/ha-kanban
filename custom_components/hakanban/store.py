@@ -31,11 +31,22 @@ async def _async_migrate(
     return old_data
 
 
+class _MigratingStore(Store):
+    """``Store`` with the schema migration hook Home Assistant expects subclasses to provide.
+
+    Home Assistant only calls it when the stored major version differs from
+    ``STORAGE_VERSION``; without an override that case raises ``NotImplementedError``.
+    """
+
+    async def _async_migrate_func(self, old_major_version, old_minor_version, old_data):
+        return await _async_migrate(old_major_version, old_minor_version, old_data)
+
+
 class HakanbanStore:
     """Debounced JSON store wrapper."""
 
     def __init__(self, hass: HomeAssistant) -> None:
-        self._store: Store[dict[str, Any]] = Store(
+        self._store: Store[dict[str, Any]] = _MigratingStore(
             hass,
             STORAGE_VERSION,
             STORAGE_KEY,

@@ -18,6 +18,9 @@ export class HakanbanPanel extends HTMLElement {
     this._showFilter = false;
     this._built = false;
     this._displayOpts = loadDisplayOpts();
+    // Surface server-side rejections through Home Assistant's own toast.
+    this._notify = (message) =>
+      this.dispatchEvent(new CustomEvent("hass-notification", { detail: { message }, bubbles: true, composed: true }));
   }
 
   // Optional: lock the initial board (used by the Lovelace card config).
@@ -29,7 +32,7 @@ export class HakanbanPanel extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     if (!this._api) {
-      this._api = new HakanbanApi(hass);
+      this._api = new HakanbanApi(hass, this._notify);
       this._start();
     } else {
       this._api.setHass(hass);
@@ -39,7 +42,7 @@ export class HakanbanPanel extends HTMLElement {
 
   connectedCallback() {
     if (this._hass && !this._api) {
-      this._api = new HakanbanApi(this._hass);
+      this._api = new HakanbanApi(this._hass, this._notify);
       this._start();
     } else if (this._api && this._built) {
       // Lovelace detaches and re-attaches cards on view/tab switches, and
@@ -111,7 +114,18 @@ export class HakanbanPanel extends HTMLElement {
       if (!this._activeBoardId || !payload.boards.find((b) => b.id === this._activeBoardId)) {
         this._activeBoardId = payload.boards[0]?.id || null;
       }
-      this._renderToolbar();
+      // The toolbar only depends on the board list, labels, undo state and which board is
+      // active; rebuilding it on every card change would drop focus from the search box.
+      const toolbarKey = JSON.stringify([
+        payload.boards.map((b) => [b.id, b.title, b.labels]),
+        this._activeBoardId,
+        payload.can_undo,
+        payload.can_redo,
+      ]);
+      if (toolbarKey !== this._toolbarKey) {
+        this._toolbarKey = toolbarKey;
+        this._renderToolbar();
+      }
       this._renderBoard();
     });
   }

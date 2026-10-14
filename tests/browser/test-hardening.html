@@ -223,6 +223,34 @@
       await sleep(100);
       check("a real change does rebuild it", renders >= 1);
 
+      // ----------------------------------- interruptions from live updates (toolbar, rename)
+      const search = embedded.shadowRoot.querySelector("#search");
+      search.focus();
+      await send("create_card", { board_id: "b1", column_id: "c2", title: "Changes elsewhere" });
+      await sleep(100);
+      check("the search box keeps focus across a card change", embedded.shadowRoot.querySelector("#search") === search && embedded.shadowRoot.activeElement === search);
+
+      const listTitle = embedded._boardEl.shadowRoot.querySelector("[data-coltitle]");
+      listTitle.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+      listTitle.textContent = "Half-typed";
+      await send("create_card", { board_id: "b1", column_id: "c3", title: "Added while renaming" });
+      await sleep(100);
+      const editing = embedded._boardEl.shadowRoot.querySelector('[contenteditable="true"]');
+      check("a list rename in progress survives a live update", editing === listTitle && editing.textContent === "Half-typed");
+      const titlesNow = () => [...embedded._boardEl.shadowRoot.querySelectorAll(".hk-card-title")].map((e) => e.textContent);
+      check("the update is held back while renaming", !titlesNow().includes("Added while renaming"));
+      listTitle.blur();
+      await sleep(150);
+      check("when the rename ends the board catches up", titlesNow().includes("Added while renaming"));
+      check("and the rename was saved", [...embedded._boardEl.shadowRoot.querySelectorAll("[data-coltitle]")].some((e) => e.textContent === "Half-typed"));
+
+      // --------------------------------------------- server rejections reach the user
+      let notice = null;
+      document.addEventListener("hass-notification", (e) => (notice = e.detail.message));
+      await embedded._api._send("definitely_not_a_command").catch(() => {});
+      await sleep(50);
+      check("a rejected request raises a notification", typeof notice === "string" && notice.length > 0);
+
       // ----------------------------------------------------------------- summary
       const passed = results.filter((r) => r.cond).length;
       const total = results.length;

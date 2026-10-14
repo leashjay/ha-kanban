@@ -28,8 +28,15 @@ export class HakanbanBoard extends HTMLElement {
     this._hass = hass;
   }
   set filter(f) {
-    this._filter = { query: (f.query || "").toLowerCase(), labels: f.labels || new Set() };
-    this.render();
+    const next = { query: (f.query || "").toLowerCase(), labels: f.labels || new Set() };
+    const prev = this._filter;
+    // The panel sets this on every update; only rebuild when the filter really changed.
+    const same =
+      prev.query === next.query &&
+      prev.labels.size === next.labels.size &&
+      [...next.labels].every((l) => prev.labels.has(l));
+    this._filter = next;
+    if (!same) this.render();
   }
   set displayOpts(o) {
     this._displayOpts = normalizeDisplayOpts(o);
@@ -37,8 +44,24 @@ export class HakanbanBoard extends HTMLElement {
   }
   set board(b) {
     this._board = b;
+    // Rebuilding the board would destroy a list title that is being renamed; hold the
+    // update until the rename finishes (blur renders it).
+    if (this._renaming()) {
+      this._deferredRender = true;
+      return;
+    }
     this.render();
     this._syncModal();
+  }
+
+  _renaming() {
+    return !!this.shadowRoot.querySelector('[contenteditable="true"]');
+  }
+
+  // Every card id in a column in order, including any hidden by the current filter.
+  _allCardIds(colId) {
+    const col = (this._board?.columns || []).find((c) => c.id === colId);
+    return (col?.cards || []).map((c) => c.id);
   }
   get board() {
     return this._board;
@@ -89,7 +112,7 @@ export class HakanbanBoard extends HTMLElement {
     const labelById = Object.fromEntries((b.labels || []).map((l) => [l.id, l]));
     const cols = (b.columns || []).map((c) => this._columnHtml(c, labelById)).join("");
     const addCol = this._addCol.open
-      ? `<div class="hk-add-col"><div class="hk-composer"><textarea data-addcol placeholder="List title…"></textarea>
+      ? `<div class="hk-add-col"><div class="hk-composer"><textarea data-addcol maxlength="500" placeholder="List title…"></textarea>
            <div class="hk-composer-actions"><button class="hk-btn" data-addcol-go>Add list</button>
            <button class="hk-btn secondary" data-addcol-cancel>✕</button></div></div></div>`
       : `<div class="hk-add-col"><button data-addcol-open>+ Add a list</button></div>`;
@@ -174,7 +197,7 @@ export class HakanbanBoard extends HTMLElement {
     wireDnD(root, api, boardId, boardEl, () => {
       this._justDragged = true;
       setTimeout(() => (this._justDragged = false), 50);
-    });
+    }, (colId) => this._allCardIds(colId));
 
     // --- column title rename ---
     root.querySelectorAll("[data-coltitle]").forEach((el) => {
@@ -187,6 +210,11 @@ export class HakanbanBoard extends HTMLElement {
         const v = el.textContent.trim();
         const col = this._board.columns.find((c) => c.id === el.dataset.coltitle);
         if (v && col && v !== col.title) api.updateColumn(boardId, el.dataset.coltitle, { title: v });
+        if (this._deferredRender) {
+          this._deferredRender = false;
+          this.render();
+          this._syncModal();
+        }
       });
       el.addEventListener("keydown", (e) => {
         // The board runs inside the Home Assistant frontend, which binds bare

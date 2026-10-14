@@ -122,8 +122,13 @@ def _stub_homeassistant():
     todo_comp.TodoListEntity = type("TodoListEntity", (), {})
     todo_comp.TodoListEntityFeature = _TodoListEntityFeature
 
+    exceptions = types.ModuleType("homeassistant.exceptions")
+    exceptions.HomeAssistantError = type("HomeAssistantError", (Exception,), {})
+    exceptions.ServiceValidationError = type("ServiceValidationError", (exceptions.HomeAssistantError,), {})
+
     for name, mod in {
         "homeassistant": ha,
+        "homeassistant.exceptions": exceptions,
         "homeassistant.core": core,
         "homeassistant.config_entries": config_entries,
         "homeassistant.helpers": helpers,
@@ -166,8 +171,11 @@ class FakeStore:
 
 
 class FakeBus:
+    def __init__(self):
+        self.events = []
+
     def async_fire(self, event_type, data=None):
-        pass
+        self.events.append((event_type, data or {}))
 
 
 class FakeHass:
@@ -277,6 +285,63 @@ def run():
     lst._handle_update(None)
     entity._handle_update(None)
     check("a None board id refreshes everything", writes == {"todo": 2, "cal": 2})
+
+    # ---------------------------------------------------- todo.move_item ordering
+    ns = types.SimpleNamespace
+    tb = mgr.create_board("Todo moves", seed=True)
+    tid, tcol = tb["id"], tb["columns"][0]["id"]
+    ca, cb, cc = (mgr.create_card(tid, tcol, n) for n in ("A", "B", "C"))
+    tl = todo.HakanbanTodoListEntity(mgr, tid, tcol)
+    order = lambda: [c["title"] for c in mgr.cards_in_column(tcol)]
+    asyncio.run(tl.async_move_todo_item(ca["id"], cb["id"]))
+    check("todo move: A after B -> B A C", order() == ["B", "A", "C"])
+    asyncio.run(tl.async_move_todo_item(cc["id"], None))
+    check("todo move: C to the top -> C B A", order() == ["C", "B", "A"])
+    asyncio.run(tl.async_move_todo_item(cc["id"], ca["id"]))
+    check("todo move: C after A (the end) -> B A C", order() == ["B", "A", "C"])
+    asyncio.run(tl.async_move_todo_item(cb["id"], cc["id"]))
+    check("todo move: B to the end -> A C B", order() == ["A", "C", "B"])
+    asyncio.run(tl.async_move_todo_item(ca["id"], cc["id"]))
+    check("todo move: A between C and B -> C A B", order() == ["C", "A", "B"])
+    asyncio.run(tl.async_move_todo_item(cb["id"], "no-such-card"))
+    check("todo move: an unknown predecessor goes to the end", order() == ["C", "A", "B"])
+
+    # ------------------------------------------- attribution and error reporting
+    async def get_user(user_id):
+        return ns(name="Sam") if user_id == "u1" else None
+
+    tl.hass = ns(auth=ns(async_get_user=get_user))
+    tl._context = ns(user_id="u1")
+    hass_events = mgr.hass.bus.events
+    n0 = len(hass_events)
+    asyncio.run(tl.async_create_todo_item(ns(
+        summary="From the to-do card", description=None, due=None,
+        status=sys.modules["homeassistant.components.todo"].TodoItemStatus.NEEDS_ACTION)))
+    created = [e for e in hass_events[n0:] if e[0] == "hakanban_card_created"]
+    check("todo create is attributed to the calling user", created and created[-1][1].get("user") == "Sam")
+    tl._context = None
+    n0 = len(hass_events)
+    asyncio.run(tl.async_create_todo_item(ns(
+        summary="Anonymous", description=None, due=None,
+        status=sys.modules["homeassistant.components.todo"].TodoItemStatus.NEEDS_ACTION)))
+    created = [e for e in hass_events[n0:] if e[0] == "hakanban_card_created"]
+    check("no context -> no user on the event", created and "user" not in created[-1][1])
+    svc_err = sys.modules["homeassistant.exceptions"].ServiceValidationError
+    try:
+        asyncio.run(tl.async_create_todo_item(ns(
+            summary="x" * 501, description=None, due=None,
+            status=sys.modules["homeassistant.components.todo"].TodoItemStatus.NEEDS_ACTION)))
+        raised = None
+    except Exception as err:  # noqa: BLE001
+        raised = err
+    check("a rejected todo change is a ServiceValidationError", isinstance(raised, svc_err))
+    try:
+        asyncio.run(tl.async_update_todo_item(ns(
+            uid="no-such-card", summary="x", description=None, due=None, status=None)))
+        raised = None
+    except Exception as err:  # noqa: BLE001
+        raised = err
+    check("an unknown card is a ServiceValidationError too", isinstance(raised, svc_err))
 
     failed = [n for n, ok in RESULTS if not ok]
     print()

@@ -101,13 +101,25 @@ export function formatDue(iso) {
 
 export function dueState(iso, complete) {
   if (!iso || complete) return complete ? "done" : "";
-  const now = new Date();
   const d = parseDue(iso);
   if (!d) return "";
-  const soon = new Date(now.getTime() + 24 * 3600 * 1000);
-  if (d < now) return "overdue";
-  if (d < soon) return "soon";
+  const now = new Date();
+  // A date-only due means "any time that day", so it isn't overdue until the day is over.
+  const dateOnly = !String(iso).includes("T");
+  const deadline = dateOnly ? new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1) : d;
+  if (deadline <= now) return "overdue";
+  if (d < new Date(now.getTime() + 24 * 3600 * 1000)) return "soon";
   return "";
+}
+
+// Value for an <input type="datetime-local"> in the viewer's own timezone. A date-only
+// due has no time of day to show, so it yields "" (and is left alone unless edited).
+export function toDatetimeLocal(iso) {
+  if (!iso || !String(iso).includes("T")) return "";
+  const d = parseDue(iso);
+  if (!d) return "";
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 // Pick a readable text colour for a label background.

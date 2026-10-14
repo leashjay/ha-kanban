@@ -59,7 +59,12 @@ tests/             # plain `python3 tests/*.py` (HA is stubbed, real package mod
 
 - **Backend/logic:** `python3 tests/test_logic.py` and `python3 tests/test_calendar.py` (no pytest,
   no HA install — they stub `homeassistant.*` and load the real package modules via importlib).
-  Add a `check(...)` to `test_logic.py` for any backend change.
+  Add a `check(...)` to `test_logic.py` for any backend change. `python3 tests/test_ws.py` covers the
+  websocket handlers (voluptuous and the HA websocket API are stubbed too). The stubs mirror HA's API but
+  cannot prove it: check any Home Assistant call you add against HA's source (this once nearly shipped a
+  `Store(async_migrate_func=...)` argument that doesn't exist).
+- **Frontend helpers (Node):** `TZ=Pacific/Auckland node tests/js/test-util.mjs` unit-tests `static/util.js`
+  and the drag-and-drop position maths in `static/dnd.js` (needs Node 22.7+ so it can import the `.js` modules).
 - **Frontend (browser):** `tests/browser/` has three pages — serve the repo and open them in a browser:
   ```bash
   python3 -m http.server 8000

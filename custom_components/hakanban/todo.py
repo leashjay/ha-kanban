@@ -6,6 +6,7 @@ Assist and the ``todo.*`` services all operate on the same board data the panel 
 
 from __future__ import annotations
 
+import functools
 from datetime import date, datetime
 from typing import Any
 
@@ -17,6 +18,7 @@ from homeassistant.components.todo import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -29,7 +31,7 @@ from .const import (
     STATUS_COMPLETED,
     STATUS_NEEDS_ACTION,
 )
-from .data import HakanbanData
+from .data import HakanbanData, HakanbanError
 
 SUPPORTED_FEATURES = (
     TodoListEntityFeature.CREATE_TODO_ITEM
@@ -89,6 +91,19 @@ def _parse_due(value: str | None) -> date | datetime | None:
         return date.fromisoformat(value)
     except ValueError:
         return None
+
+
+def _as_service_error(method):
+    """Report a rejected change (too long, unknown card...) as a normal HA service error."""
+
+    @functools.wraps(method)
+    async def wrapper(self, *args, **kwargs):
+        try:
+            return await method(self, *args, **kwargs)
+        except HakanbanError as err:
+            raise ServiceValidationError(str(err)) from err
+
+    return wrapper
 
 
 class HakanbanTodoListEntity(TodoListEntity):
@@ -162,19 +177,38 @@ class HakanbanTodoListEntity(TodoListEntity):
         )
 
     # --------------------------------------------------------------- actions
+    async def _acting_user(self):
+        """Attribute the change to whoever triggered the service call, if known.
+
+        The lookup is awaited *before* the ``with`` block that uses the result, so nothing
+        yields to the event loop while the actor is set.
+        """
+        context = getattr(self, "_context", None)
+        user_id = getattr(context, "user_id", None)
+        name = None
+        hass = getattr(self, "hass", None)
+        if user_id and hass is not None:
+            user = await hass.auth.async_get_user(user_id)
+            name = user.name if user else None
+        return self._manager.acting_as(user_id, name)
+
+    @_as_service_error
     async def async_create_todo_item(self, item: TodoItem) -> None:
         due = item.due.isoformat() if item.due else None
-        self._manager.create_card(
-            self._board_id,
-            self._column_id,
-            item.summary or "",
-            description=item.description or "",
-            due=due,
-            status=STATUS_COMPLETED
-            if item.status == TodoItemStatus.COMPLETED
-            else STATUS_NEEDS_ACTION,
-        )
+        actor = await self._acting_user()
+        with actor:
+            self._manager.create_card(
+                self._board_id,
+                self._column_id,
+                item.summary or "",
+                description=item.description or "",
+                due=due,
+                status=STATUS_COMPLETED
+                if item.status == TodoItemStatus.COMPLETED
+                else STATUS_NEEDS_ACTION,
+            )
 
+    @_as_service_error
     async def async_update_todo_item(self, item: TodoItem) -> None:
         fields: dict[str, Any] = {}
         if item.summary is not None:
@@ -188,19 +222,29 @@ class HakanbanTodoListEntity(TodoListEntity):
                 else STATUS_NEEDS_ACTION
             )
         fields["due"] = item.due.isoformat() if item.due else None
-        self._manager.update_card(item.uid, **fields)
+        actor = await self._acting_user()
+        with actor:
+            self._manager.update_card(item.uid, **fields)
 
+    @_as_service_error
     async def async_delete_todo_items(self, uids: list[str]) -> None:
-        for uid in uids:
-            self._manager.delete_card(uid)
+        actor = await self._acting_user()
+        with actor:
+            for uid in uids:
+                self._manager.delete_card(uid)
 
+    @_as_service_error
     async def async_move_todo_item(self, uid: str, previous_uid: str | None) -> None:
-        ordered = self._manager.cards_in_column(self._column_id)
-        if previous_uid is None:
-            position = 0
-        else:
-            position = next(
-                (i + 1 for i, c in enumerate(ordered) if c["id"] == previous_uid),
-                len(ordered),
-            )
-        self._manager.move_card(uid, to_column=self._column_id, position=position)
+        # The server removes the moved card before inserting it, so positions must be
+        # counted in the list *without* it (otherwise moving a card down lands one too far).
+        actor = await self._acting_user()
+        with actor:
+            others = [c for c in self._manager.cards_in_column(self._column_id) if c["id"] != uid]
+            if previous_uid is None:
+                position = 0
+            else:
+                position = next(
+                    (i + 1 for i, c in enumerate(others) if c["id"] == previous_uid),
+                    len(others),
+                )
+            self._manager.move_card(uid, to_column=self._column_id, position=position)

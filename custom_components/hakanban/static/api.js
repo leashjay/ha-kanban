@@ -1,8 +1,11 @@
 // Thin wrapper over the Home Assistant websocket connection for hakanban/* commands.
 
 export class HakanbanApi {
-  constructor(hass) {
+  // `notify(message)` is called when the server rejects a request (too long, invalid...)
+  // so the user sees why nothing happened instead of silently losing what they typed.
+  constructor(hass, notify = null) {
     this.hass = hass;
+    this.notify = notify;
   }
 
   setHass(hass) {
@@ -10,7 +13,12 @@ export class HakanbanApi {
   }
 
   _send(type, payload = {}) {
-    return this.hass.connection.sendMessagePromise({ type: `hakanban/${type}`, ...payload });
+    const request = this.hass.connection.sendMessagePromise({ type: `hakanban/${type}`, ...payload });
+    // Attaching a handler also stops fire-and-forget callers logging an unhandled rejection.
+    request.catch((err) => {
+      if (this.notify) this.notify(err?.message || "Hakanban: the request failed");
+    });
+    return request;
   }
 
   get() {
