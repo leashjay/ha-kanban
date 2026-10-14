@@ -169,6 +169,15 @@ def run():
     ws.ws_move_card(hass, conn3, {"id": 4, "card_id": card["id"], "to_column": b2["columns"][1]["id"]})
     moved = [e for e in hass.bus.events if e[0] == "hakanban_card_moved" and e[1]["card_id"] == card["id"]]
     check("a websocket move event carries the user", moved and moved[-1][1].get("user") == "Sam")
+    ws.ws_create_card(hass, conn3, {"id": 6, "board_id": b2["id"], "column_id": b2["columns"][0]["id"],
+                                    "title": "for Cameron", "assignees": ["person.cameron"]})
+    check("a card can be created with assignees over the websocket",
+          conn3.results[-1][1]["assignees"] == ["person.cameron"])
+    ws.ws_create_card(hass, conn3, {"id": 8, "board_id": b2["id"], "column_id": b2["columns"][0]["id"],
+                                    "title": "bad", "assignees": ["light.kitchen"]})
+    check("a non-person assignee is an invalid_request", conn3.errors[-1][1] == "invalid_request")
+    ws.ws_update_card(hass, conn3, {"id": 9, "card_id": card["id"], "assignees": ["person.alyssa"]})
+    check("assignees can be set over the websocket", mgr2.cards[card["id"]]["assignees"] == ["person.alyssa"])
     ws.ws_add_comment(hass, conn3, {"id": 5, "card_id": "nope", "text": "x"})
     check("an invalid request is a websocket error, not an exception",
           conn3.errors and conn3.errors[-1][1] == "invalid_request")

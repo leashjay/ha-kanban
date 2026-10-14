@@ -22,6 +22,12 @@ CARD_JS_FILENAME: Final = "hakanban-card.js"
 # hass.data keys
 DATA_MANAGER: Final = "manager"
 
+# Options (Settings > Devices & services > Hakanban > Configure): the sidebar name and icon.
+CONF_PANEL_TITLE: Final = "panel_title"
+CONF_PANEL_ICON: Final = "panel_icon"
+ICON_PATTERN: Final = r"mdi:[a-z0-9-]+"
+MAX_PANEL_TITLE_LEN: Final = 40
+
 # Default label palette (Trello-ish). id -> (name, colour)
 DEFAULT_LABELS: Final = [
     {"id": "green", "name": "", "color": "#61bd4f"},
@@ -53,6 +59,19 @@ ORDER_STEP: Final = 1000
 
 # Undo/redo: how many past states to retain (snapshot-based history, store-wide).
 UNDO_HISTORY_LIMIT: Final = 50
+
+# The only definition of what a label colour / board background may look like. Backend
+# validation uses these and every payload carries them to the frontend (``validation``), so
+# there is no second copy to keep in sync. They are written to mean the same thing in
+# Python's ``re`` and JavaScript's ``RegExp`` (explicit ASCII classes, no \d or \s).
+COLOR_PATTERN: Final = r"#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})"
+GRADIENT_PATTERN: Final = (
+    r"linear-gradient\([0-9]{1,3}deg,[ ]*#[0-9a-fA-F]{3,8},[ ]*#[0-9a-fA-F]{3,8}\)"
+)
+
+# Who a card can be assigned to: a Home Assistant person entity (each person is linked to a
+# user account), stored by entity id so a rename doesn't break the assignment.
+ASSIGNEE_PATTERN: Final = r"person\.[a-z0-9_]+"
 
 # Input limits. Every mutation snapshots the whole document for undo and every change
 # is broadcast in full to each connected client, so unbounded text from any logged-in

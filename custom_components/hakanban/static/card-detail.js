@@ -2,6 +2,7 @@
 // directly and relies on the live subscription to refresh the board behind it.
 
 import { STYLES } from "./styles.js";
+import { listPeople, peopleById as indexPeople, personFor, personChipHtml } from "./people.js";
 import {
   escapeHtml,
   renderMarkdown,
@@ -19,10 +20,11 @@ export class HakanbanCardDetail extends HTMLElement {
     this._editingDesc = false;
   }
 
-  setContext({ card, board, api, onClose }) {
+  setContext({ card, board, api, hass, onClose }) {
     this._card = card;
     this._board = board;
     this._api = api;
+    this._hass = hass;
     this._onClose = onClose;
     this.render();
   }
@@ -116,6 +118,15 @@ export class HakanbanCardDetail extends HTMLElement {
     if (!c) return;
     const selected = new Set(c.labels || []);
 
+    // Everyone Home Assistant knows about, plus anyone already on the card who has since gone.
+    const people = listPeople(this._hass);
+    const byPerson = indexPeople(people);
+    const assigned = new Set(c.assignees || []);
+    const gone = [...assigned].filter((id) => !byPerson[id]).map((id) => personFor(byPerson, id));
+    const assigneesHtml =
+      [...people, ...gone].map((p) => personChipHtml(p, { selected: assigned.has(p.id), dataAttr: "data-person" })).join("") ||
+      '<span style="color:var(--hk-subtle)">No people found in Home Assistant</span>';
+
     const labelsHtml = (b.labels || [])
       .map((l) => {
         const sel = selected.has(l.id) ? "selected" : "";
@@ -169,6 +180,11 @@ export class HakanbanCardDetail extends HTMLElement {
               <input type="text" id="hk-label-name" maxlength="60" placeholder="Label name">
               <span id="hk-label-palette"></span>
             </div>
+          </div>
+
+          <div class="hk-section">
+            <h3>Assigned to</h3>
+            <div class="hk-label-row">${assigneesHtml}</div>
           </div>
 
           <div class="hk-section">
@@ -239,6 +255,16 @@ export class HakanbanCardDetail extends HTMLElement {
         const labels = new Set(c.labels || []);
         labels.has(id) ? labels.delete(id) : labels.add(id);
         api.updateCard(c.id, { labels: [...labels] });
+      });
+    });
+
+    // Assignees
+    root.querySelectorAll("[data-person]").forEach((chip) => {
+      chip.addEventListener("click", () => {
+        const next = new Set(c.assignees || []);
+        const id = chip.dataset.person;
+        next.has(id) ? next.delete(id) : next.add(id);
+        api.updateCard(c.id, { assignees: [...next] });
       });
     });
 

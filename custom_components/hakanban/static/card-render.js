@@ -2,10 +2,11 @@
 // component stays a thin shell. No DOM, no state; just (card, opts) -> HTML.
 
 import { escapeHtml, formatDue, dueState, labelStyle, renderMarkdown } from "./util.js";
+import { avatarHtml, personFor } from "./people.js";
 
 // Build the HTML for a single card given the card object, a label-id map,
-// and the normalised display options.
-export function cardHtml(card, labelById, opts) {
+// the normalised display options and (optionally) a person-id map for the avatars.
+export function cardHtml(card, labelById, opts, peopleById = {}) {
   const labels = (card.labels || [])
     .map((id) => labelById[id])
     .filter(Boolean)
@@ -39,7 +40,13 @@ export function cardHtml(card, labelById, opts) {
     ? commentsBlockHtml(card.comments, opts)
     : "";
 
-  const badgesHtml = badges.length ? `<div class="hk-card-badges">${badges.join("")}</div>` : "";
+  const assignees = opts.showAssignees ? card.assignees || [] : [];
+  const peopleHtml = assignees.length
+    ? `<div class="hk-card-people">${assignees.map((id) => avatarHtml(personFor(peopleById, id))).join("")}</div>`
+    : "";
+  const badgesHtml = badges.length || peopleHtml
+    ? `<div class="hk-card-foot"><div class="hk-card-badges">${badges.join("")}</div>${peopleHtml}</div>`
+    : "";
   const completed = card.status === "completed" ? "completed" : "";
   return `
       <div class="hk-card ${completed}" draggable="true" data-card="${escapeHtml(card.id)}" data-col="${escapeHtml(card.column_id)}">

@@ -34,6 +34,13 @@ add_card:
       description: List of label IDs to apply.
       selector:
         object:
+    assignees:
+      name: Assigned to
+      description: Home Assistant people to assign the card to.
+      selector:
+        entity:
+          domain: person
+          multiple: true
     due:
       name: Due
       description: Due date/time (ISO 8601).
@@ -82,6 +89,13 @@ update_card:
       name: Title
       selector:
         text:
+    assignees:
+      name: Assigned to
+      description: Replace the card's assignees with these Home Assistant people (an empty list unassigns everyone).
+      selector:
+        entity:
+          domain: person
+          multiple: true
     description:
       name: Description
       selector:

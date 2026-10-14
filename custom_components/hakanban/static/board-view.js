@@ -7,6 +7,7 @@ import { HakanbanCardDetail } from "./card-detail.js";
 import { escapeHtml, safeBackground } from "./util.js";
 import { normalizeDisplayOpts } from "./display-opts.js";
 import { cardHtml } from "./card-render.js";
+import { listPeople, peopleById as indexPeople, UNASSIGNED } from "./people.js";
 import { wireDnD } from "./dnd.js";
 
 export class HakanbanBoard extends HTMLElement {
@@ -15,7 +16,7 @@ export class HakanbanBoard extends HTMLElement {
     this.attachShadow({ mode: "open" });
     this._composer = { openCol: null, value: "" };
     this._addCol = { open: false, value: "" };
-    this._filter = { query: "", labels: new Set() };
+    this._filter = { query: "", labels: new Set(), people: new Set() };
     this._openCardId = null;
     this._modal = null;
     this._displayOpts = normalizeDisplayOpts({});
@@ -28,13 +29,13 @@ export class HakanbanBoard extends HTMLElement {
     this._hass = hass;
   }
   set filter(f) {
-    const next = { query: (f.query || "").toLowerCase(), labels: f.labels || new Set() };
+    // Copies, not the caller's sets: the panel mutates its own sets in place and hands them
+    // over again, so comparing against the same object would always report "unchanged".
+    const next = { query: (f.query || "").toLowerCase(), labels: new Set(f.labels || []), people: new Set(f.people || []) };
     const prev = this._filter;
     // The panel sets this on every update; only rebuild when the filter really changed.
-    const same =
-      prev.query === next.query &&
-      prev.labels.size === next.labels.size &&
-      [...next.labels].every((l) => prev.labels.has(l));
+    const sameSet = (a, b) => a.size === b.size && [...a].every((x) => b.has(x));
+    const same = prev.query === next.query && sameSet(prev.labels, next.labels) && sameSet(prev.people, next.people);
     this._filter = next;
     if (!same) this.render();
   }
@@ -68,8 +69,13 @@ export class HakanbanBoard extends HTMLElement {
   }
 
   _cardVisible(card) {
-    const { query, labels } = this._filter;
+    const { query, labels, people } = this._filter;
     if (labels.size && !(card.labels || []).some((l) => labels.has(l))) return false;
+    if (people.size) {
+      const assigned = card.assignees || [];
+      const hit = assigned.some((p) => people.has(p)) || (people.has(UNASSIGNED) && !assigned.length);
+      if (!hit) return false;
+    }
     if (query) {
       const hay = `${card.title} ${card.description || ""} #${card.number}`.toLowerCase();
       if (!hay.includes(query)) return false;
@@ -77,9 +83,9 @@ export class HakanbanBoard extends HTMLElement {
     return true;
   }
 
-  _columnHtml(col, labelById) {
+  _columnHtml(col, labelById, peopleById = {}) {
     const cards = (col.cards || []).filter((c) => this._cardVisible(c));
-    const cardsHtml = cards.map((c) => cardHtml(c, labelById, this._displayOpts)).join("");
+    const cardsHtml = cards.map((c) => cardHtml(c, labelById, this._displayOpts, peopleById)).join("");
     const composerOpen = this._composer.openCol === col.id;
     const footer = composerOpen
       ? `<div class="hk-composer">
@@ -110,7 +116,8 @@ export class HakanbanBoard extends HTMLElement {
     }
     const b = this._board;
     const labelById = Object.fromEntries((b.labels || []).map((l) => [l.id, l]));
-    const cols = (b.columns || []).map((c) => this._columnHtml(c, labelById)).join("");
+    const byPerson = indexPeople(listPeople(this._hass));
+    const cols = (b.columns || []).map((c) => this._columnHtml(c, labelById, byPerson)).join("");
     const addCol = this._addCol.open
       ? `<div class="hk-add-col"><div class="hk-composer"><textarea data-addcol maxlength="500" placeholder="List title…"></textarea>
            <div class="hk-composer-actions"><button class="hk-btn" data-addcol-go>Add list</button>
@@ -306,6 +313,7 @@ export class HakanbanBoard extends HTMLElement {
       card,
       board: this._board,
       api: this._api,
+      hass: this._hass,
       onClose: () => {
         this._openCardId = null;
         this._modal = null;

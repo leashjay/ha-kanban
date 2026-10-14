@@ -67,6 +67,18 @@ function makeSeed() {
 }
 
 const state = makeSeed();
+
+// The server sends the colour/background validation patterns with every payload; they are
+// defined once in const.py, so read them from there (the test server serves the repo).
+{
+  const src = await (await fetch("/custom_components/hakanban/const.py")).text();
+  const pattern = (name) => {
+    const m = new RegExp(`^${name}: Final = (?:\\(\\s*)?r"(.*)"(?:\\s*\\))?$`, "m").exec(src);
+    if (!m) throw new Error(`${name} not found in const.py`);
+    return m[1];
+  };
+  state.validation = { color: pattern("COLOR_PATTERN"), gradient: pattern("GRADIENT_PATTERN") };
+}
 const subscribers = new Set();
 
 function findBoard(id) {
@@ -246,6 +258,17 @@ window.__mockHass = {
       return Promise.resolve(() => {});
     },
   },
-  states: {},
+  // Home Assistant people (person.* entities) and the logged-in user, for the assignee UI.
+  user: { id: "u-alyssa", name: "Alyssa Josephs", is_admin: true },
+  states: Object.fromEntries(
+    [
+      ["person.alyssa", "Alyssa", "u-alyssa", "/api/image/serve/abc123/512x512"],
+      ["person.cameron", "Cameron", "u-cameron", null],
+      ["person.joy_josephs", "Joy Josephs", "u-joy", null],
+    ].map(([id, name, userId, picture]) => [
+      id,
+      { entity_id: id, state: "home", attributes: { friendly_name: name, user_id: userId, ...(picture ? { entity_picture: picture } : {}) } },
+    ])
+  ),
   themes: {},
 };

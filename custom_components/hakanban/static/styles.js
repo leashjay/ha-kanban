@@ -196,4 +196,28 @@ export const STYLES = `
 .hk-board.compact .hk-card-badges { margin-top: 3px; font-size: .66rem; gap: 6px; }
 .hk-board.compact .hk-card-labels { margin-bottom: 4px; gap: 3px; }
 .hk-board.compact .hk-label { font-size: .6rem; padding: 1px 6px; }
+
+/* Assigned people: round avatars (picture or initials) on the card, toggle chips elsewhere. */
+.hk-card-foot { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.hk-card-foot .hk-card-badges { margin-top: 0; flex: 1; min-width: 0; }
+.hk-card-people { display: flex; margin-left: auto; padding-left: 6px; }
+.hk-card-people .hk-avatar + .hk-avatar { margin-left: -6px; }
+.hk-avatar {
+  position: relative; display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 24px; height: 24px; border-radius: 50%; overflow: hidden;
+  font-size: .62rem; font-weight: 700; color: #fff; line-height: 1;
+  box-shadow: 0 0 0 2px var(--hk-card-bg);
+}
+.hk-avatar img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.hk-avatar.unknown { opacity: .55; }
+.hk-person-chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 12px 3px 4px; margin: 0 6px 4px 0;
+  border-radius: 16px; cursor: pointer; user-select: none; font-size: .85rem;
+  background: var(--hk-divider); color: var(--hk-text);
+}
+.hk-person-chip:not(:has(.hk-avatar)) { padding-left: 12px; }
+.hk-person-chip.selected { outline: 2px solid var(--hk-accent); }
+.hk-person-chip .hk-avatar { box-shadow: none; }
+.hk-board.compact .hk-card-foot { margin-top: 3px; }
+.hk-board.compact .hk-avatar { width: 20px; height: 20px; font-size: .55rem; }
 `;

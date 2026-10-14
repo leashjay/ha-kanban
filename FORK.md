@@ -81,13 +81,27 @@ Performance
 - The panel skips updates identical to what it already shows, rebuilds the board once (not twice) per
   update, and keeps the board and list scroll positions across live updates.
 
+## Added in this fork
+
+- **Assign cards to Home Assistant people.** Cards can be assigned to one or more `person.*` entities;
+  the card face shows their picture or initials, the card modal has a picker, the filter bar can filter by
+  person / Unassigned and marks the logged-in user "(me)", and an "Assigned people" display option turns
+  the avatars off. Assignment changes put `assigned` / `unassigned` on the card events so an automation can
+  notify people. `hakanban.add_card` / `update_card` and the websocket API accept `assignees`.
+- **A configurable name and icon** for the sidebar entry and the toolbar header (Configure on the
+  integration), defaulting to the original "Hakanban".
+- **One definition of the colour rules.** The label colour / background patterns live in `const.py` and are
+  sent to the page with every payload, so the Python and JavaScript validators can no longer drift apart.
+
+Regression fixed: the board's "has the filter changed?" check (added in 0.1.8-fork.2) compared the filter
+sets with themselves, so clicking a label in the filter bar didn't filter anything. It now compares copies.
+
 ## Known gaps (not fixed here)
 
 - Archived cards, lists and boards aren't shown anywhere, so archiving a card makes it disappear with
   no way to restore it from the UI.
 - Undo/redo is one store-wide history shared by every user and automation.
 - Every websocket command and service is open to any logged-in user (no admin check).
-- Assignees exist in the data model but there is no UI to set or show them.
 - A board rename doesn't reach the device registry until a restart, and deleted lists/boards leave entity
   registry entries behind (neither has been verified or fixed here).
 

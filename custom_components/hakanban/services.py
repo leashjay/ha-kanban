@@ -25,6 +25,7 @@ ADD_CARD_SCHEMA = vol.Schema(
         vol.Required("title"): cv.string,
         vol.Optional("description"): cv.string,
         vol.Optional("labels"): vol.All(cv.ensure_list, [cv.string]),
+        vol.Optional("assignees"): vol.All(cv.ensure_list, [cv.entity_id]),
         vol.Optional("due"): cv.string,
     }
 )
@@ -44,6 +45,7 @@ UPDATE_CARD_SCHEMA = vol.Schema(
         vol.Optional("title"): cv.string,
         vol.Optional("description"): cv.string,
         vol.Optional("labels"): vol.All(cv.ensure_list, [cv.string]),
+        vol.Optional("assignees"): vol.All(cv.ensure_list, [cv.entity_id]),
         vol.Optional("due"): vol.Any(cv.string, None),
         vol.Optional("status"): vol.In(["needs_action", "completed"]),
     }
@@ -74,6 +76,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                 call.data["title"],
                 description=call.data.get("description", ""),
                 labels=call.data.get("labels", []),
+                assignees=call.data.get("assignees", []),
                 due=call.data.get("due"),
             )
         except HakanbanError as err:

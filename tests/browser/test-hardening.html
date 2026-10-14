@@ -94,7 +94,8 @@
       const shadowEls = [];
       for (const el of deepEls(document)) if (el.getRootNode() instanceof ShadowRoot) shadowEls.push(el);
       check("no injected script/img/iframe elements in the UI",
-        shadowEls.length > 0 && !shadowEls.some((e) => ["SCRIPT", "IMG", "IFRAME"].includes(e.tagName)));
+        shadowEls.length > 0 && !shadowEls.some((e) =>
+          ["SCRIPT", "IMG", "IFRAME"].includes(e.tagName) && !e.parentElement?.classList.contains("hk-avatar")));
       const faceChip = [...deepEls(boardEl.shadowRoot)].find((e) => e.classList?.contains("hk-label") && e.textContent === "evil");
       check("card-face label falls back to a neutral colour", faceChip?.getAttribute("style")?.startsWith("background:#838c91"));
       const modal = document.querySelector("hakanban-card-detail");
@@ -244,12 +245,45 @@
       check("when the rename ends the board catches up", titlesNow().includes("Added while renaming"));
       check("and the rename was saved", [...embedded._boardEl.shadowRoot.querySelectorAll("[data-coltitle]")].some((e) => e.textContent === "Half-typed"));
 
+      // ------------------------------------------------ the label filter applies (regression)
+      // The panel hands the board the same Set it keeps mutating; the board used to compare it
+      // with itself and never re-render, so clicking a label changed nothing.
+      const cardTitles = () => [...embedded._boardEl.shadowRoot.querySelectorAll(".hk-card-title")].map((e) => e.textContent);
+      const shownBefore = cardTitles().length;
+      embedded._showFilter = true;
+      embedded._renderFilterbar();
+      const redChip = embedded.shadowRoot.querySelector('[data-flabel="red"]');
+      redChip.click();
+      await sleep(100);
+      check("clicking a label filters the board to cards with it",
+        cardTitles().length > 0 && cardTitles().length < shownBefore && cardTitles().includes("Walk the dog"));
+      embedded.shadowRoot.querySelector("[data-clearf]").click();
+      await sleep(100);
+      check("Clear brings every card back", cardTitles().length === shownBefore);
+      embedded._showFilter = false;
+      embedded._renderFilterbar();
+
       // --------------------------------------------- server rejections reach the user
       let notice = null;
       document.addEventListener("hass-notification", (e) => (notice = e.detail.message));
       await embedded._api._send("definitely_not_a_command").catch(() => {});
       await sleep(50);
       check("a rejected request raises a notification", typeof notice === "string" && notice.length > 0);
+
+      // ------------------------------------------------- the configurable toolbar name
+      const brand = (p) => p.shadowRoot.querySelector(".hk-title")?.textContent;
+      check("the toolbar shows the default name when none is configured", brand(sidebar) === "📋 Hakanban");
+      sidebar.panel = { config: { title: "Renovation" } };
+      await sleep(60);
+      check("the toolbar shows the configured name", brand(sidebar) === "📋 Renovation");
+      sidebar.panel = { config: { title: '"><img src=x onerror=window.__xss5=1>' } };
+      await sleep(60);
+      check("a hostile configured name is shown as text, not markup",
+        brand(sidebar).includes("<img") && !sidebar.shadowRoot.querySelector(".hk-title img") && window.__xss5 === undefined);
+      check("a dashboard card shows no name of its own", brand(embedded) === "");
+      sidebar.panel = { config: { title: "   " } };
+      await sleep(60);
+      check("a blank configured name falls back to the default", brand(sidebar) === "📋 Hakanban");
 
       // ----------------------------------------------------------------- summary
       const passed = results.filter((r) => r.cond).length;

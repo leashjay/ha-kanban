@@ -417,6 +417,59 @@ def run():
     mgr._sanitize_loaded()
     check("load resets a bad stored due date", mgr.cards[vc["id"]]["due"] is None)
 
+    # ------------------------------------------- colour rules have a single definition
+    const_mod = sys.modules["hkpkg.const"]
+    vpayload = mgr.full_payload()["validation"]
+    check("payload carries the colour pattern from const.py", vpayload["color"] == const_mod.COLOR_PATTERN)
+    check("payload carries the gradient pattern from const.py", vpayload["gradient"] == const_mod.GRADIENT_PATTERN)
+    import re as _re
+    for name in ("COLOR_PATTERN", "GRADIENT_PATTERN"):
+        pat = getattr(const_mod, name)
+        check(f"{name} means the same in Python and JavaScript (no \\d, \\s, \\w or inline flags)",
+              not _re.search(r"\\[dswDSW]|\(\?[a-zA-Z]", pat))
+    check("the validator uses those exact patterns",
+          data._HEX_COLOR.pattern == const_mod.COLOR_PATTERN and data._GRADIENT.pattern == const_mod.GRADIENT_PATTERN)
+
+    # ------------------------------------------------------------------ assignees
+    ab = mgr.create_board("People", seed=True)
+    aid, acol = ab["id"], ab["columns"][0]["id"]
+    ac = mgr.create_card(aid, acol, "who does it")
+    check("a new card has no assignees", ac["assignees"] == [])
+    n0 = len(hass.bus.events)
+    mgr.update_card(ac["id"], assignees=["person.alyssa", "person.cameron"])
+    check("assignees are stored in order", mgr.cards[ac["id"]]["assignees"] == ["person.alyssa", "person.cameron"])
+    ev = [e for e in hass.bus.events[n0:] if e[0] == "hakanban_card_updated"][-1][1]
+    check("the event lists who was assigned", ev.get("assigned") == ["person.alyssa", "person.cameron"])
+    check("and no unassigned when nobody was removed", "unassigned" not in ev)
+    n0 = len(hass.bus.events)
+    mgr.update_card(ac["id"], assignees=["person.cameron", "person.joy_josephs"])
+    ev = [e for e in hass.bus.events[n0:] if e[0] == "hakanban_card_updated"][-1][1]
+    check("the event lists only the newly assigned", ev.get("assigned") == ["person.joy_josephs"])
+    check("the event lists who was taken off", ev.get("unassigned") == ["person.alyssa"])
+    n0 = len(hass.bus.events)
+    mgr.update_card(ac["id"], title="renamed")
+    ev = [e for e in hass.bus.events[n0:] if e[0] == "hakanban_card_updated"][-1][1]
+    check("an unrelated update mentions no assignment", "assigned" not in ev and "unassigned" not in ev)
+    mgr.update_card(ac["id"], assignees=[])
+    check("an empty list unassigns everyone", mgr.cards[ac["id"]]["assignees"] == [])
+    mgr.update_card(ac["id"], assignees=["person.sam", "person.sam", "person.sam"])
+    check("repeats are collapsed", mgr.cards[ac["id"]]["assignees"] == ["person.sam"])
+    for bad in ("sam", "light.kitchen", "person.", "person.Sam", "person.a b", "person.sam\n", '"onclick=x',
+                "person.\u0661", ""):
+        check(f"assignee rejected: {bad!r}", raises(mgr.update_card, ac["id"], assignees=[bad]))
+    check("a rejected assignee list changes nothing", mgr.cards[ac["id"]]["assignees"] == ["person.sam"])
+    n0 = len(hass.bus.events)
+    pre = mgr.create_card(aid, acol, "assigned on creation", assignees=["person.alyssa"])
+    created = [e for e in hass.bus.events[n0:] if e[0] == "hakanban_card_created"][-1][1]
+    check("a card created with assignees keeps them", pre["assignees"] == ["person.alyssa"])
+    check("and the created event says who it is for", created.get("assigned") == ["person.alyssa"])
+    check("creating with a bad assignee fails", raises(mgr.create_card, aid, acol, "x", assignees=["nope"]))
+    mgr.cards[ac["id"]]["assignees"] = ["person.ok", "<img src=x>", 5, "light.x"]
+    mgr._sanitize_loaded()
+    check("load drops anything that isn't a person", mgr.cards[ac["id"]]["assignees"] == ["person.ok"])
+    mgr.move_card(ac["id"], ab["columns"][1]["id"])
+    check("assignees survive a move", mgr.cards[ac["id"]]["assignees"] == ["person.ok"])
+
     # ------------------------------------------------ review fixes (round 2)
     rb = mgr.create_board("Review fixes", seed=True)
     rid, rcol = rb["id"], rb["columns"][0]["id"]
