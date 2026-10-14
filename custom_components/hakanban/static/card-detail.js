@@ -113,13 +113,12 @@ export class HakanbanCardDetail extends HTMLElement {
     const c = this._card;
     const b = this._board;
     if (!c) return;
-    const labelById = Object.fromEntries((b.labels || []).map((l) => [l.id, l]));
     const selected = new Set(c.labels || []);
 
     const labelsHtml = (b.labels || [])
       .map((l) => {
         const sel = selected.has(l.id) ? "selected" : "";
-        return `<span class="hk-label-chip ${sel}" data-label="${l.id}" style="${labelStyle(l.color)}">${escapeHtml(l.name || "·")}</span>`;
+        return `<span class="hk-label-chip ${sel}" data-label="${escapeHtml(l.id)}" style="${labelStyle(l.color)}">${escapeHtml(l.name || "·")}</span>`;
       })
       .join("");
 
@@ -130,11 +129,11 @@ export class HakanbanCardDetail extends HTMLElement {
         const items = cl.items
           .map(
             (i) =>
-              `<label class="hk-check-item ${i.done ? "done" : ""}"><input type="checkbox" data-check="${cl.id}:${i.id}" ${i.done ? "checked" : ""}><span>${escapeHtml(i.text)}</span></label>`
+              `<label class="hk-check-item ${i.done ? "done" : ""}"><input type="checkbox" data-check="${escapeHtml(cl.id)}:${escapeHtml(i.id)}" ${i.done ? "checked" : ""}><span>${escapeHtml(i.text)}</span></label>`
           )
           .join("");
         return `<div class="hk-section"><h3>${escapeHtml(cl.title)} (${done}/${total})</h3>${items}
-          <div class="hk-row"><input type="text" class="hk-add-check" data-cl="${cl.id}" placeholder="Add an item…"></div></div>`;
+          <div class="hk-row"><input type="text" class="hk-add-check" data-cl="${escapeHtml(cl.id)}" placeholder="Add an item…"></div></div>`;
       })
       .join("");
 
@@ -148,10 +147,10 @@ export class HakanbanCardDetail extends HTMLElement {
       .join("");
 
     const columnsOptions = (b.columns || [])
-      .map((col) => `<option value="${col.id}" ${col.id === c.column_id ? "selected" : ""}>${escapeHtml(col.title)}</option>`)
+      .map((col) => `<option value="${escapeHtml(col.id)}" ${col.id === c.column_id ? "selected" : ""}>${escapeHtml(col.title)}</option>`)
       .join("");
 
-    const dueLocal = c.due ? String(c.due).slice(0, 16) : "";
+    const dueLocal = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(c.due || "") ? String(c.due).slice(0, 16) : "";
 
     this.shadowRoot.innerHTML = `
       <style>${STYLES}</style>
@@ -174,7 +173,7 @@ export class HakanbanCardDetail extends HTMLElement {
           <div class="hk-section">
             <h3>Due date</h3>
             <div class="hk-row">
-              <input type="datetime-local" id="hk-due" value="${dueLocal}">
+              <input type="datetime-local" id="hk-due" value="${escapeHtml(dueLocal)}">
               <label><input type="checkbox" id="hk-due-complete" ${c.due_complete ? "checked" : ""}> Complete</label>
               <button class="hk-btn secondary" id="hk-due-clear">Clear</button>
             </div>

@@ -172,6 +172,57 @@
       await sleep(40);
       check("sidebar panel handles Ctrl+Z exactly once", undoCount() === u0 + 1);
 
+      // ------------------------------------------------ hostile due value / card height
+      await send("update_card", { card_id: cardId, due: '"onclick=alert(1)' });
+      await sleep(100);
+      boardEl._openCard(cardId);
+      await sleep(100);
+      const modal2 = document.querySelector("hakanban-card-detail");
+      const dueInput = modal2.shadowRoot.querySelector("#hk-due");
+      check("a hostile due value doesn't reach the form field", dueInput && dueInput.value === "" && !dueInput.hasAttribute("onclick"));
+      check("no event-handler attributes after a hostile due value", eventHandlerAttrs().length === 0);
+      modal2._close();
+      await send("update_card", { card_id: cardId, due: null });
+
+      await import("/custom_components/hakanban/static/hakanban-card.js");
+      const dash = document.createElement("hakanban-card");
+      dash.setConfig({ board: "", height: "600px}</style><img src=x onerror=window.__xss3=1><style>" });
+      host.appendChild(dash);
+      dash.hass = hass;
+      await sleep(150);
+      check("a hostile card height can't inject markup",
+        ![...dash.shadowRoot.querySelectorAll("*")].some((e) => e.tagName === "IMG") && window.__xss3 === undefined);
+      check("a hostile card height falls back to the default", dash.shadowRoot.querySelector("style").textContent.includes("height: 600px"));
+      host.removeChild(dash);
+
+      // ---------------------------------------------------------- scroll position
+      for (let i = 0; i < 8; i++) await send("create_column", { board_id: "b1", title: `Extra ${i}` });
+      for (let i = 0; i < 40; i++) await send("create_card", { board_id: "b1", column_id: "c1", title: `Filler ${i}` });
+      await sleep(300);
+      const scroller = () => embedded._boardEl.shadowRoot.querySelector("[data-board]");
+      const firstList = () => embedded._boardEl.shadowRoot.querySelector('[data-cards="c1"]');
+      scroller().scrollLeft = 300;
+      firstList().scrollTop = 250;
+      const gotLeft = scroller().scrollLeft;
+      const gotTop = firstList().scrollTop;
+      check("setup: the board and a list are really scrollable", gotLeft > 0 && gotTop > 0);
+      await send("create_card", { board_id: "b1", column_id: "c2", title: "Triggers a re-render" });
+      await sleep(150);
+      check("board scroll position survives a live update", scroller().scrollLeft === gotLeft);
+      check("list scroll position survives a live update", firstList().scrollTop === gotTop);
+
+      // ------------------------------------------------ unchanged payloads are skipped
+      let renders = 0;
+      const realRender = embedded._boardEl.render.bind(embedded._boardEl);
+      embedded._boardEl.render = () => { renders++; realRender(); };
+      const sample = embedded._boardEl.board.columns[0].cards[0];
+      await send("update_card", { card_id: sample.id, title: sample.title }); // same value
+      await sleep(100);
+      check("an update that changes nothing doesn't rebuild the board", renders === 0);
+      await send("update_card", { card_id: sample.id, title: "A different title" });
+      await sleep(100);
+      check("a real change does rebuild it", renders >= 1);
+
       // ----------------------------------------------------------------- summary
       const passed = results.filter((r) => r.cond).length;
       const total = results.length;

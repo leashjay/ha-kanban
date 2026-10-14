@@ -6,7 +6,7 @@
 // dashboard, not just in the sidebar panel. The panel owns the live
 // subscription and re-establishes it when Lovelace re-attaches the card.
 
-import { escapeHtml } from "./util.js";
+import { escapeHtml, safeCssLength } from "./util.js";
 import "./hakanban-panel.js";
 
 class HakanbanCard extends HTMLElement {
@@ -35,7 +35,7 @@ class HakanbanCard extends HTMLElement {
   }
 
   _build() {
-    const height = this._config.height || "600px";
+    const height = safeCssLength(this._config.height, "600px");
     this.shadowRoot.innerHTML = `
       <style>
         ha-card { overflow: hidden; }

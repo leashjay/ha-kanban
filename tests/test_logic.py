@@ -72,12 +72,14 @@ class FakeStore:
 
     def __init__(self):
         self.saved = 0
+        self.pending = None  # the callable a delayed save would call when it fires
 
     async def async_load(self):
         return {"boards": {}, "cards": {}}
 
-    def async_schedule_save(self, data):
+    def async_schedule_save(self, data_func):
         self.saved += 1
+        self.pending = data_func
 
     async def async_save(self, data):
         self.saved += 1
@@ -112,7 +114,8 @@ def run():
     data = _load_module("hkpkg", "data")
 
     hass = FakeHass()
-    mgr = data.HakanbanData(hass, FakeStore())
+    store = FakeStore()
+    mgr = data.HakanbanData(hass, store)
 
     # Seed a board with 3 columns (mirrors async_load's first-run seed).
     board = mgr.create_board("Test", seed=True)
@@ -334,6 +337,85 @@ def run():
     moved_card = mgr.move_card(lc["id"], ocol, to_board=oid)
     check("cross-board move renumbers on the new board", moved_card["number"] == existing["number"] + 1)
     check("cross-board move drops labels the new board lacks", moved_card["labels"] == ["green"])
+
+    # ------------------------------------------------ persistence / payload cache
+    pb = mgr.create_board("Persist", seed=True)
+    pid, pcol = pb["id"], pb["columns"][0]["id"]
+    mgr.create_card(pid, pcol, "kept")
+    check("a delayed save writes the current document", store.pending() is mgr._data)
+    raises(mgr.create_cards_bulk, pid, pcol, ["half"] * 3 + ["x" * 501])
+    check("after a rolled-back failure the pending save writes the restored document",
+          store.pending() is mgr._data and not any(c["title"] == "half" for c in store.pending()["cards"].values()))
+    mgr.undo()
+    check("after undo the pending save follows the new document", store.pending() is mgr._data)
+
+    p1 = mgr.full_payload()
+    check("payload is cached between changes", mgr.full_payload() is p1)
+    mgr.create_card(pid, pcol, "invalidates")
+    p2 = mgr.full_payload()
+    check("a change invalidates the cached payload", p2 is not p1 and any(
+        c["title"] == "invalidates" for b in p2["boards"] for col in b["columns"] for c in col["cards"]))
+
+    # A mutation that edits an existing card and then fails must leave neither the document
+    # nor the (cached) payload showing the half-applied edit.
+    victim = mgr.create_card(pid, pcol, "intact")
+
+    @data._undoable
+    def mutate_then_fail(self, card_id):
+        self.cards[card_id]["title"] = "HALF-APPLIED"
+        raise data.HakanbanError("boom")
+
+    def titles(payload):
+        return [c["title"] for b in payload["boards"] for col in b["columns"] for c in col["cards"]]
+
+    before_titles = titles(mgr.full_payload())  # primes the cache
+    raises(mutate_then_fail, mgr, victim["id"])
+    check("a failed mutation is rolled back in the document", mgr.cards[victim["id"]]["title"] == "intact")
+    check("a failed mutation never leaks into the cached payload",
+          "HALF-APPLIED" not in titles(mgr.full_payload()) and titles(mgr.full_payload()) == before_titles)
+    check("payload groups cards by column in order", [
+        c["title"] for col in mgr.full_payload()["boards"][-1]["columns"][:1] for c in col["cards"]] == [
+        c["title"] for c in mgr.cards_in_column(pcol)])
+    arch = mgr.create_card(pid, pcol, "archived one")
+    mgr.update_card(arch["id"], archived=True)
+    check("archived cards stay out of the payload", not any(
+        c["id"] == arch["id"] for b in mgr.full_payload()["boards"] for col in b["columns"] for c in col["cards"]))
+
+    # Which board's listeners are told: one board, or everyone for undo/cross-board moves.
+    sent = []
+    data.async_dispatcher_send = lambda hass_, signal, board_id=None: sent.append(board_id)
+    mgr.create_card(pid, pcol, "same board")
+    check("a normal change signals just its board", sent[-1] == pid)
+    mv_src = mgr.create_card(pid, pcol, "travels")
+    other_b = mgr.create_board("Elsewhere", seed=True)
+    sent.clear()
+    mgr.move_card(mv_src["id"], other_b["columns"][0]["id"], to_board=other_b["id"])
+    check("a cross-board move signals every board", sent[-1] is None)
+    mgr.undo()
+    check("undo signals every board", sent[-1] is None)
+
+    # ------------------------------------------------------------ due / assignee validation
+    vb = mgr.create_board("Validation", seed=True)
+    vid, vcol = vb["id"], vb["columns"][0]["id"]
+    for good in ("2026-10-20", "2026-10-20T09:30", "2026-10-20T09:30:15", "2026-10-20T09:30:15.123456",
+                 "2026-10-20T09:30:00+13:00", "2026-10-20T09:30:00Z"):
+        check(f"due accepted: {good}", mgr.create_card(vid, vcol, "d", due=good)["due"] == good)
+    for bad in ('"onclick=alert(1)', 'x" onfocus="y', "tomorrow", "2026-13-40", "2026-02-30",
+                "2026-10-20T25:00", "2026-10-20T09:61", "2026-10-20T09:30:99", "2026-10-20<script>",
+                "2026-10-20T09:30\n", "20261020"):
+        check(f"due rejected: {bad!r}", raises(mgr.create_card, vid, vcol, "d", due=bad))
+    vc = mgr.create_card(vid, vcol, "v", due="2026-10-20")
+    check("update_card rejects a bad due", raises(mgr.update_card, vc["id"], due='"onclick=alert(1)'))
+    check("a rejected due leaves the old one", mgr.cards[vc["id"]]["due"] == "2026-10-20")
+    mgr.update_card(vc["id"], due="")
+    check("update_card(due='') clears the due date", mgr.cards[vc["id"]]["due"] is None)
+    check("too many assignees rejected", raises(mgr.update_card, vc["id"], assignees=["person.a"] * 21))
+    check("overlong assignee rejected", raises(mgr.update_card, vc["id"], assignees=["x" * 256]))
+    check("assignees accepted", mgr.update_card(vc["id"], assignees=["person.sam"])["assignees"] == ["person.sam"])
+    check("overlong cover rejected", raises(mgr.update_card, vc["id"], cover="x" * 501))
+    mgr.cards[vc["id"]]["due"] = '"onclick=alert(1)'
+    mgr._sanitize_loaded()
+    check("load resets a bad stored due date", mgr.cards[vc["id"]]["due"] is None)
 
     failed = [n for n, ok in RESULTS if not ok]
     print()

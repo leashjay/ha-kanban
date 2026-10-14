@@ -9,22 +9,53 @@ export function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
-// Tiny, safe-ish markdown subset: bold, italic, code, links, line breaks, bullets.
+// Tiny markdown subset: `code`, **bold**, *italic*, [links](https://…) and "- " / "* " lists.
+// Everything is HTML-escaped first, so the only markup in the output is what this builds.
+const inlineMarkdown = (text) =>
+  text
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>");
+
 export function renderMarkdown(text) {
   if (!text) return "";
-  let html = escapeHtml(text);
-  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
-  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  html = html.replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>");
-  html = html.replace(
+  // Links are lifted out before emphasis is applied so a "*" or "`" inside a URL stays
+  // part of the URL; they are put back at the end. NUL can't appear in the input.
+  const links = [];
+  const escaped = escapeHtml(String(text).replace(/\0/g, "")).replace(
     /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
-    '<a href="$2" target="_blank" rel="noopener">$1</a>'
+    (_, label, url) => {
+      links.push(`<a href="${url}" target="_blank" rel="noopener noreferrer">${inlineMarkdown(label)}</a>`);
+      return `\0${links.length - 1}\0`;
+    }
   );
-  // unordered lists
-  html = html.replace(/(?:^|\n)[-*] (.+)/g, "\n<li>$1</li>");
-  html = html.replace(/(<li>[\s\S]*?<\/li>)/g, "<ul>$1</ul>");
-  html = html.replace(/\n/g, "<br>");
-  return html;
+
+  const out = [];
+  let list = null; // consecutive bullet lines share one <ul>
+  for (const line of escaped.split("\n")) {
+    const bullet = /^[-*] (.+)$/.exec(line);
+    if (bullet) {
+      if (!list) out.push((list = []));
+      list.push(`<li>${inlineMarkdown(bullet[1])}</li>`);
+    } else {
+      list = null;
+      out.push(inlineMarkdown(line));
+    }
+  }
+  const html = out
+    .map((part) => (Array.isArray(part) ? `<ul>${part.join("")}</ul>` : part))
+    .join("<br>")
+    // a list is a block, so no <br> next to it
+    .replace(/<br>(<ul>)/g, "$1")
+    .replace(/(<\/ul>)<br>/g, "$1");
+  return html.replace(/\0(\d+)\0/g, (_, i) => links[Number(i)]);
+}
+
+// A CSS length from untrusted config (e.g. a dashboard card's ``height``); anything that
+// isn't a plain number with a unit falls back, so it can't carry extra CSS or markup.
+export function safeCssLength(value, fallback) {
+  const v = typeof value === "number" ? `${value}px` : String(value ?? "").trim();
+  return /^\d+(?:\.\d+)?(?:px|em|rem|vh|vw|%)$/.test(v) ? v : fallback;
 }
 
 // Colours and backgrounds are written into inline ``style`` attributes, so only values of

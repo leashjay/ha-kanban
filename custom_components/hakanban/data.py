@@ -18,6 +18,7 @@ import contextlib
 import copy
 import functools
 import re
+from datetime import date
 from typing import Any, Callable, Iterator, TypeVar
 
 from homeassistant.core import HomeAssistant
@@ -33,6 +34,8 @@ from .const import (
     EVENT_CARD_DELETED,
     EVENT_CARD_MOVED,
     EVENT_CARD_UPDATED,
+    MAX_ASSIGNEES,
+    MAX_ASSIGNEE_LEN,
     MAX_LABEL_NAME_LEN,
     MAX_LABELS_PER_BOARD,
     MAX_PASTE_LINES,
@@ -82,6 +85,40 @@ def _check_background(value: str | None) -> str | None:
     return value
 
 
+# A due value is a date or a date-time; the frontend puts it in form fields and the
+# todo/calendar platforms parse it, so nothing else is accepted.
+_DUE = re.compile(
+    r"\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})?)?"
+)
+
+
+def _check_due(value: str | None) -> str | None:
+    """Return a valid ISO date / date-time string, ``None`` for empty, else raise."""
+    if value in (None, ""):
+        return None
+    ok = isinstance(value, str) and _DUE.fullmatch(value) is not None
+    if ok:
+        try:
+            date.fromisoformat(value[:10])
+        except ValueError:
+            ok = False
+    if ok and len(value) > 10:
+        ok = int(value[11:13]) < 24 and int(value[14:16]) < 60
+        if ok and len(value) > 16 and value[16] == ":":
+            ok = int(value[17:19]) < 60
+    if not ok:
+        raise HakanbanError("Due must be a date (YYYY-MM-DD) or date-time (YYYY-MM-DDTHH:MM[:SS])")
+    return value
+
+
+def _check_assignees(value: list[str]) -> list[str]:
+    if len(value) > MAX_ASSIGNEES:
+        raise HakanbanError(f"A card can have at most {MAX_ASSIGNEES} assignees")
+    for who in value:
+        _check_len("Assignee", who, MAX_ASSIGNEE_LEN)
+    return list(value)
+
+
 # Card fields that may be set back to ``None`` through ``update_card``.
 _CLEARABLE = frozenset({"due", "cover"})
 
@@ -116,6 +153,8 @@ def _undoable(method: Callable[..., _T]) -> Callable[..., _T]:
             self._undo_stack.pop()
             self._redo_stack = saved_redo
             self._data = snapshot
+            # A cached payload still points into the half-mutated document.
+            self._payload_cache = None
             raise
         if len(self._undo_stack) > UNDO_HISTORY_LIMIT:
             self._undo_stack.pop(0)
@@ -137,6 +176,10 @@ class HakanbanData:
         self._data: dict[str, Any] = empty_data()
         # Who is making the current change (set by the websocket/service entry points).
         self._actor: dict[str, str] = {}
+        # Bumped on every change; lets ``full_payload`` be built once per change
+        # instead of once per connected client.
+        self._version = 0
+        self._payload_cache: tuple[int, dict[str, Any]] | None = None
         self._undo_stack: list[dict[str, Any]] = []
         self._redo_stack: list[dict[str, Any]] = []
 
@@ -158,6 +201,11 @@ class HakanbanData:
         value saved by an older version (or edited into ``.storage`` by hand) must not
         be able to carry markup. Anything that fails today's checks is reset.
         """
+        for card in self._data["cards"].values():
+            try:
+                card["due"] = _check_due(card.get("due"))
+            except HakanbanError:
+                card["due"] = None
         for board in self._data["boards"].values():
             try:
                 board["background"] = _check_background(board.get("background"))
@@ -239,8 +287,14 @@ class HakanbanData:
         event: str | None = None,
         event_data: dict[str, Any] | None = None,
     ) -> None:
-        """Persist, fire an optional event, and notify listeners."""
-        self._store.async_schedule_save(self._data)
+        """Persist, fire an optional event, and notify listeners.
+
+        ``board_id`` names the one board that changed so per-board listeners can skip
+        the update; ``None`` means "anything may have changed" (undo/redo, or a
+        change that touches more than one board).
+        """
+        self._version += 1
+        self._store.async_schedule_save(lambda: self._data)
         if event is not None:
             self._fire(event, event_data or {})
         async_dispatcher_send(self.hass, SIGNAL_BOARDS_UPDATED, board_id)
@@ -296,9 +350,23 @@ class HakanbanData:
         cards.sort(key=lambda c: c.get("order", 0))
         return cards
 
-    def board_payload(self, board_id: str) -> dict[str, Any]:
+    def _cards_by_column(self) -> dict[str, list[dict[str, Any]]]:
+        """Every non-archived card grouped by column and sorted, in a single pass."""
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for card in self.cards.values():
+            if not card.get("archived"):
+                grouped.setdefault(card["column_id"], []).append(card)
+        for cards in grouped.values():
+            cards.sort(key=lambda c: c.get("order", 0))
+        return grouped
+
+    def board_payload(
+        self, board_id: str, by_column: dict[str, list[dict[str, Any]]] | None = None
+    ) -> dict[str, Any]:
         """Board with columns -> cards nested, ready for the frontend."""
         board = self._require_board(board_id)
+        if by_column is None:
+            by_column = self._cards_by_column()
         columns = sorted(
             (c for c in board["columns"] if not c.get("archived")),
             key=lambda c: c.get("order", 0),
@@ -310,20 +378,26 @@ class HakanbanData:
             "archived": board.get("archived", False),
             "labels": board.get("label_defs", []),
             "columns": [
-                {**col, "cards": self.cards_in_column(col["id"])} for col in columns
+                {**col, "cards": by_column.get(col["id"], [])} for col in columns
             ],
         }
 
     def full_payload(self) -> dict[str, Any]:
-        return {
+        """Everything the frontend shows; cached until the next change."""
+        if self._payload_cache and self._payload_cache[0] == self._version:
+            return self._payload_cache[1]
+        by_column = self._cards_by_column()
+        payload = {
             "boards": [
-                self.board_payload(bid)
+                self.board_payload(bid, by_column)
                 for bid, b in self.boards.items()
                 if not b.get("archived")
             ],
             "can_undo": self.can_undo,
             "can_redo": self.can_redo,
         }
+        self._payload_cache = (self._version, payload)
+        return payload
 
     # ---------------------------------------------------------------- boards
     def _unique_board_title(self, title: str, exclude_id: str | None = None) -> str:
@@ -457,13 +531,13 @@ class HakanbanData:
             "title": title.strip() or "Untitled",
             "description": description,
             "labels": self._clean_labels(board, fields.get("labels", [])),
-            "assignees": list(fields.get("assignees", [])),
-            "due": fields.get("due"),
+            "assignees": _check_assignees(fields.get("assignees", [])),
+            "due": _check_due(fields.get("due")),
             "due_complete": fields.get("due_complete", False),
             "status": fields.get("status", STATUS_NEEDS_ACTION),
             "checklists": [],
             "comments": [],
-            "cover": fields.get("cover"),
+            "cover": _check_len("Cover", fields.get("cover"), MAX_TITLE_LEN) or None,
             "archived": False,
             "created": _now(),
             "updated": _now(),
@@ -516,6 +590,12 @@ class HakanbanData:
             fields["labels"] = self._clean_labels(
                 self._require_board(card["board_id"]), fields["labels"]
             )
+        if "due" in fields:
+            fields["due"] = _check_due(fields["due"])
+        if fields.get("assignees") is not None:
+            fields["assignees"] = _check_assignees(fields["assignees"])
+        if fields.get("cover") is not None:
+            _check_len("Cover", fields["cover"], MAX_TITLE_LEN)
         for key in (
             "title", "description", "labels", "assignees", "due",
             "due_complete", "status", "cover", "archived",
@@ -597,7 +677,9 @@ class HakanbanData:
         card["updated"] = _now()
 
         self._commit(
-            board_id, EVENT_CARD_MOVED,
+            # A cross-board move changes two boards, so tell every listener.
+            board_id if from_board_id == board_id else None,
+            EVENT_CARD_MOVED,
             {
                 "board_id": board_id,
                 "card_id": card_id,

@@ -189,7 +189,7 @@ def run():
     _load_module("hkpkg", "const")
     _load_module("hkpkg", "store")
     data = _load_module("hkpkg", "data")
-    _load_module("hkpkg", "todo")
+    todo = _load_module("hkpkg", "todo")
     # Importing the module at all proves the platform's imports are valid.
     cal = _load_module("hkpkg", "calendar")
     check("calendar module imports cleanly", hasattr(cal, "HakanbanCalendarEntity"))
@@ -255,6 +255,28 @@ def run():
     check("completed card still shows in the calendar view", soon["id"] in {e.uid for e in still})
     mgr.update_card(soon["id"], status="needs_action", due_complete=True)
     check("due_complete card is skipped as the next event", entity.event.uid == d_card["id"])
+
+    # Entities only react to changes on their own board, and a todo list only rewrites its
+    # state when something it shows actually changed.
+    writes = {"todo": 0, "cal": 0}
+    lst = todo.HakanbanTodoListEntity(mgr, bid, col)
+    lst.async_write_ha_state = lambda: writes.__setitem__("todo", writes["todo"] + 1)
+    entity.async_write_ha_state = lambda: writes.__setitem__("cal", writes["cal"] + 1)
+
+    lst._handle_update("some-other-board")
+    entity._handle_update("some-other-board")
+    check("entities ignore updates for other boards", writes == {"todo": 0, "cal": 0})
+    lst._handle_update(bid)
+    check("todo list skips the write when nothing visible changed", writes["todo"] == 0)
+    mgr.create_card(bid, col, "A new one")
+    lst._handle_update(bid)
+    entity._handle_update(bid)
+    check("todo list writes when its items change", writes["todo"] == 1)
+    check("calendar writes for its own board", writes["cal"] == 1)
+    mgr.create_card(bid, col, "Another")
+    lst._handle_update(None)
+    entity._handle_update(None)
+    check("a None board id refreshes everything", writes == {"todo": 2, "cal": 2})
 
     failed = [n for n, ok in RESULTS if not ok]
     print()

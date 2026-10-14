@@ -94,6 +94,11 @@ export class HakanbanPanel extends HTMLElement {
   _subscribe() {
     if (!this._api || this._unsub) return;
     this._unsub = this._api.subscribe((payload) => {
+      // Many writes change nothing the UI shows (re-saving a value, an automation that
+      // sets what is already set); don't rebuild the whole board for those.
+      const key = JSON.stringify(payload);
+      if (key === this._lastPayload) return;
+      this._lastPayload = key;
       this._data = payload;
       // Resolve the initial board: explicit config > localStorage > first board.
       if (this._initialBoardWant) {
@@ -137,7 +142,7 @@ export class HakanbanPanel extends HTMLElement {
     const tabs = boards
       .map(
         (b) =>
-          `<button class="hk-tab ${b.id === this._activeBoardId ? "active" : ""}" data-board="${b.id}">${escapeHtml(b.title)}</button>`
+          `<button class="hk-tab ${b.id === this._activeBoardId ? "active" : ""}" data-board="${escapeHtml(b.id)}">${escapeHtml(b.title)}</button>`
       )
       .join("");
     const canUndo = !!this._data?.can_undo;
@@ -209,7 +214,7 @@ export class HakanbanPanel extends HTMLElement {
     const chips = (board.labels || [])
       .map(
         (l) =>
-          `<span class="hk-label-chip ${this._activeLabels.has(l.id) ? "selected" : ""}" data-flabel="${l.id}" style="${labelStyle(l.color)}">${escapeHtml(l.name || "·")}</span>`
+          `<span class="hk-label-chip ${this._activeLabels.has(l.id) ? "selected" : ""}" data-flabel="${escapeHtml(l.id)}" style="${labelStyle(l.color)}">${escapeHtml(l.name || "·")}</span>`
       )
       .join("");
     bar.innerHTML = `<div class="hk-row" style="padding:8px 16px;border-bottom:1px solid var(--hk-divider)"><strong style="margin-right:6px">Labels:</strong>${chips || "<em>No labels yet</em>"} <button class="hk-btn secondary" data-clearf>Clear</button></div>`;

@@ -146,8 +146,14 @@ class HakanbanTodoListEntity(TodoListEntity):
         )
 
     @callback
-    def _handle_update(self, _board_id: str | None = None) -> None:
+    def _handle_update(self, board_id: str | None = None) -> None:
+        # ``None`` = anything may have changed; otherwise only our own board matters.
+        if board_id is not None and board_id != self._board_id:
+            return
+        name, items = self._attr_name, self._attr_todo_items
         self._refresh()
+        if name == self._attr_name and items == self._attr_todo_items:
+            return  # nothing visible changed (e.g. a label or comment edit)
         self.async_write_ha_state()
 
     async def async_added_to_hass(self) -> None:

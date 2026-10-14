@@ -60,22 +60,22 @@ export class HakanbanBoard extends HTMLElement {
     const composerOpen = this._composer.openCol === col.id;
     const footer = composerOpen
       ? `<div class="hk-composer">
-           <textarea data-composer="${col.id}" placeholder="Enter a title… (paste multiple lines for multiple cards)"></textarea>
+           <textarea data-composer="${escapeHtml(col.id)}" placeholder="Enter a title… (paste multiple lines for multiple cards)"></textarea>
            <div class="hk-composer-actions">
-             <button class="hk-btn" data-add="${col.id}">Add card</button>
-             <button class="hk-btn secondary" data-cancel="${col.id}">✕</button>
+             <button class="hk-btn" data-add="${escapeHtml(col.id)}">Add card</button>
+             <button class="hk-btn secondary" data-cancel="${escapeHtml(col.id)}">✕</button>
            </div>
          </div>`
-      : `<div class="hk-composer"><button class="hk-btn secondary hk-addcard" data-open="${col.id}">+ Add a card</button></div>`;
+      : `<div class="hk-composer"><button class="hk-btn secondary hk-addcard" data-open="${escapeHtml(col.id)}">+ Add a card</button></div>`;
 
     return `
-      <div class="hk-col" data-col="${col.id}">
-        <div class="hk-col-head" draggable="true" data-colhead="${col.id}">
-          <span class="hk-col-title" data-coltitle="${col.id}">${escapeHtml(col.title)}</span>
+      <div class="hk-col" data-col="${escapeHtml(col.id)}">
+        <div class="hk-col-head" draggable="true" data-colhead="${escapeHtml(col.id)}">
+          <span class="hk-col-title" data-coltitle="${escapeHtml(col.id)}">${escapeHtml(col.title)}</span>
           <span class="hk-col-count">${cards.length}</span>
-          <button class="hk-col-menu" data-colmenu="${col.id}" title="Delete list">🗑</button>
+          <button class="hk-col-menu" data-colmenu="${escapeHtml(col.id)}" title="Delete list">🗑</button>
         </div>
-        <div class="hk-cards" data-cards="${col.id}">${cardsHtml}</div>
+        <div class="hk-cards" data-cards="${escapeHtml(col.id)}">${cardsHtml}</div>
         ${footer}
       </div>`;
   }
@@ -97,11 +97,34 @@ export class HakanbanBoard extends HTMLElement {
     const safeBg = safeBackground(b.background);
     const bg = safeBg ? `style="background:${safeBg}"` : "";
     const compactCls = this._displayOpts.compact ? "compact" : "";
+    // Every live update rebuilds the board, which would snap the board and each list
+    // back to the top-left; remember where they were scrolled to.
+    const scroll = this._captureScroll();
     this.shadowRoot.innerHTML = `<style>${STYLES}</style>
       <div class="hk-board ${compactCls}" data-board ${bg}>${cols}${addCol}</div>`;
 
     this._wire();
     this._restoreComposer();
+    this._restoreScroll(scroll);
+  }
+
+  _captureScroll() {
+    const board = this.shadowRoot.querySelector("[data-board]");
+    if (!board) return null;
+    const lists = {};
+    this.shadowRoot.querySelectorAll("[data-cards]").forEach((el) => {
+      if (el.scrollTop) lists[el.dataset.cards] = el.scrollTop;
+    });
+    return { left: board.scrollLeft, lists };
+  }
+
+  _restoreScroll(scroll) {
+    if (!scroll) return;
+    const board = this.shadowRoot.querySelector("[data-board]");
+    if (board) board.scrollLeft = scroll.left;
+    this.shadowRoot.querySelectorAll("[data-cards]").forEach((el) => {
+      if (scroll.lists[el.dataset.cards]) el.scrollTop = scroll.lists[el.dataset.cards];
+    });
   }
 
   _restoreComposer() {

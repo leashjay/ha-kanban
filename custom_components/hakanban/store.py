@@ -7,7 +7,7 @@ The todo entities and the websocket API are thin views over this document.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
@@ -53,9 +53,15 @@ class HakanbanStore:
         data.setdefault("cards", {})
         return data
 
-    def async_schedule_save(self, data: dict[str, Any]) -> None:
-        """Schedule a debounced save of the full document."""
-        self._store.async_delay_save(lambda: data, SAVE_DELAY)
+    def async_schedule_save(self, data_func: Callable[[], dict[str, Any]]) -> None:
+        """Schedule a debounced save of the document returned by ``data_func``.
+
+        A callable rather than the document itself: undo, redo and a rolled-back
+        mutation all replace the manager's document object, and the delayed save
+        must write whichever one is current when it fires, not the one that was
+        current when it was scheduled.
+        """
+        self._store.async_delay_save(data_func, SAVE_DELAY)
 
     async def async_save(self, data: dict[str, Any]) -> None:
         """Write immediately (used on unload)."""

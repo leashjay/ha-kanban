@@ -21,7 +21,6 @@ CARD_JS_FILENAME: Final = "hakanban-card.js"
 
 # hass.data keys
 DATA_MANAGER: Final = "manager"
-DATA_UNSUB: Final = "unsub"
 
 # Default label palette (Trello-ish). id -> (name, colour)
 DEFAULT_LABELS: Final = [
@@ -63,3 +62,5 @@ MAX_TEXT_LEN: Final = 20000  # card descriptions and comments
 MAX_LABEL_NAME_LEN: Final = 60
 MAX_PASTE_LINES: Final = 200  # cards created by one multi-line paste
 MAX_LABELS_PER_BOARD: Final = 100
+MAX_ASSIGNEES: Final = 20  # per card
+MAX_ASSIGNEE_LEN: Final = 255  # an entity id / person name
